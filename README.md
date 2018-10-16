@@ -1,7 +1,7 @@
 [![Build Status](https://travis-ci.org/miekg/dns.svg?branch=master)](https://travis-ci.org/miekg/dns)
 [![Code Coverage](https://img.shields.io/codecov/c/github/miekg/dns/master.svg)](https://codecov.io/github/miekg/dns?branch=master)
-[![Go Report Card](https://goreportcard.com/badge/github.com/miekg/dns)](https://goreportcard.com/report/miekg/dns)
-[![](https://godoc.org/github.com/miekg/dns?status.svg)](https://godoc.org/github.com/miekg/dns)
+[![Go Report Card](https://goreportcard.com/badge/github.com/cyrill-k/dns)](https://goreportcard.com/report/miekg/dns)
+[![](https://godoc.org/github.com/cyrill-k/dns?status.svg)](https://godoc.org/github.com/cyrill-k/dns)
 
 # Alternative (more granular) approach to a DNS library
 
@@ -47,8 +47,8 @@ A not-so-up-to-date-list-that-may-be-actually-current:
 * https://github.com/benschw/dns-clb-go
 * https://github.com/corny/dnscheck for http://public-dns.info/
 * https://namesmith.io
-* https://github.com/miekg/unbound
-* https://github.com/miekg/exdns
+* https://github.com/cyrill-k/unbound
+* https://github.com/cyrill-k/exdns
 * https://dnslookup.org
 * https://github.com/looterz/grimd
 * https://github.com/phamhongviet/serf-dns
@@ -96,15 +96,15 @@ Miek Gieben  -  2010-2012  -  <miek@miek.nl>
 Building is done with the `go` tool. If you have setup your GOPATH correctly, the following should
 work:
 
-    go get github.com/miekg/dns
-    go build github.com/miekg/dns
+    go get github.com/cyrill-k/dns
+    go build github.com/cyrill-k/dns
 
 ## Examples
 
 A short "how to use the API" is at the beginning of doc.go (this also will show
-when you call `godoc github.com/miekg/dns`).
+when you call `godoc github.com/cyrill-k/dns`).
 
-Example programs can be found in the `github.com/miekg/exdns` repository.
+Example programs can be found in the `github.com/cyrill-k/exdns` repository.
 
 ## Supported RFCs
 

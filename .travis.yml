@@ -8,8 +8,8 @@ go:
 
 before_install:
   # don't use the miekg/dns when testing forks
-  - mkdir -p $GOPATH/src/github.com/miekg
-  - ln -s $TRAVIS_BUILD_DIR $GOPATH/src/github.com/miekg/ || true
+  - mkdir -p $GOPATH/src/github.com/cyrill-k
+  - ln -s $TRAVIS_BUILD_DIR $GOPATH/src/github.com/cyrill-k/ || true
 
 script:
   - go test -race -v -bench=. -coverprofile=coverage.txt -covermode=atomic ./...

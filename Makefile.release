@@ -18,7 +18,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/miekg/dns"
+	"github.com/cyrill-k/dns"
 )
 
 func main() {

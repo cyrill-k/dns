@@ -20,7 +20,7 @@ func TestDynamicUpdateParsing(t *testing.T) {
 }
 
 func TestDynamicUpdateUnpack(t *testing.T) {
-	// From https://github.com/miekg/dns/issues/150#issuecomment-62296803
+	// From https://github.com/cyrill-k/dns/issues/150#issuecomment-62296803
 	// It should be an update message for the zone "example.",
 	// deleting the A RRset "example." and then adding an A record at "example.".
 	// class ANY, TYPE A
