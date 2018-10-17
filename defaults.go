@@ -24,6 +24,7 @@ func (dns *Msg) SetReply(request *Msg) *Msg {
 		dns.Question = make([]Question, 1)
 		dns.Question[0] = request.Question[0]
 	}
+	request.PackBuffer(dns.Request)
 	return dns
 }
 

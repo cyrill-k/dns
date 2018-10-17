@@ -1,9 +1,14 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"net"
 	"path/filepath"
 	"strconv"
 
@@ -14,7 +19,7 @@ var records = map[string]string{
 	"test.service.": "1.2.3.4",
 }
 
-var keys = map[string]string{}
+var signer dns.SignerWithAlgorithm
 
 func parseQuery(m *dns.Msg) {
 	for _, q := range m.Question {
@@ -42,7 +47,15 @@ func handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
 		parseQuery(m)
 	}
 
-	pilaSign(m, keys["private"])
+	host, _, error := net.SplitHostPort(w.RemoteAddr().String())
+	if error != nil {
+		log.Printf("Error retrieving IP address: ", error.Error())
+	}
+
+	error = dns.PilaSign(m, signer, net.ParseIP(host))
+	if error != nil {
+		log.Printf("Error signing response: ", error.Error())
+	}
 
 	w.WriteMsg(m)
 }
@@ -52,19 +65,19 @@ func main() {
 	keyFolder := flag.String("genfolder", "-", "folder where the ECDSA keys are saved")
 	flag.Parse()
 
-	if keyFolder == "-" {
-		keyFolder = "~/test/"
+	if *keyFolder == "-" {
+		*keyFolder = "/home/cyrill/test/"
 	}
-	privPath := filepath.Join(keyFolder, "private.pem")
-	pubPath := filepath.Join(keyFolder, "public.pem")
+	privPath := filepath.Join(*keyFolder, "private.pem")
+	pubPath := filepath.Join(*keyFolder, "public.pem")
 
-	if generateKeys {
+	if *generateKeys {
 		privateKey, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
-		publicKey := &privateKey.PublicKey
+		publicKey := privateKey.PublicKey
 
-		encPriv, encPub := encode(privateKey, publicKey)
+		encPriv, encPub := dns.EncodeEcdsaKeys(privateKey, &publicKey)
 
-		err = ioutil.WriteFile(privPath, []byte(encPriv), 0644)
+		err := ioutil.WriteFile(privPath, []byte(encPriv), 0644)
 		if err != nil {
 			panic(err)
 		}
@@ -74,9 +87,8 @@ func main() {
 		}
 	}
 
-	priv, pub := readKeys(privPath, pubPath)
-	keys["private"] = priv
-	keys["public"] = pub
+	priv, _ := dns.ReadKeys(privPath, pubPath)
+	signer = dns.NewECDSASigner(priv)
 
 	// attach request handler func
 	dns.HandleFunc("service.", handleDnsRequest)

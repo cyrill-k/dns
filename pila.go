@@ -1,15 +1,132 @@
 package dns
 
 import (
+	"bytes"
+	"crypto"
+	"crypto/dsa"
 	"crypto/ecdsa"
-	"crypto/x509"
-	"encoding/pem"
+	"crypto/elliptic"
+	"crypto/rsa"
+	"encoding/binary"
+	"errors"
+	"io/ioutil"
+	"math/big"
+	"net"
+	"strings"
+	"time"
 
-	"github.com/cyrill-k/dns"
+	"crypto/x509"
+	"encoding/asn1"
+	"encoding/pem"
 )
 
+type EndpointIdentifierType int
+
+const (
+	pilaTxtNameString                        = ".pila"
+	pilaSIGNameString                        = ".pila"
+	pilaKEYNameString                        = ".pila"
+	pilaIPv4          EndpointIdentifierType = 1
+	pilaIPv6          EndpointIdentifierType = 2
+	pilaScion         EndpointIdentifierType = 100 // temporary assignment
+)
+
+type SignerWithAlgorithm interface {
+	Signer() crypto.Signer
+	Algorithm() uint8
+}
+
+type PublicKeyWithAlgorithm interface {
+	PublicKeyBase64() string
+	Algorithm() uint8
+}
+
+type ECDSASigner struct {
+	PrivateKey     *ecdsa.PrivateKey
+	AlgorithmValue uint8
+}
+
+type ECDSAPublicKey struct {
+	PublicKey      *ecdsa.PublicKey
+	AlgorithmValue uint8
+}
+
+func (signer *ECDSASigner) Signer() crypto.Signer {
+	return signer.PrivateKey
+}
+
+func (signer *ECDSASigner) Algorithm() uint8 {
+	return signer.AlgorithmValue
+}
+
+func (pub *ECDSAPublicKey) PublicKeyBase64() string {
+	var buffer []byte
+	var lenbuf int
+	switch pub.PublicKey.Curve {
+	case elliptic.P256():
+		lenbuf = 64
+	case elliptic.P384():
+		lenbuf = 96
+	}
+	copy(buffer[:lenbuf/2], pub.PublicKey.X.Bytes())
+	copy(buffer[lenbuf/2:], pub.PublicKey.Y.Bytes())
+	return toBase64(buffer)
+}
+
+func (pub *ECDSAPublicKey) Algorithm() uint8 {
+	return pub.AlgorithmValue
+}
+
+func NewECDSASigner(privateKey *ecdsa.PrivateKey) SignerWithAlgorithm {
+	signer := ECDSASigner{
+		PrivateKey:     privateKey,
+		AlgorithmValue: ECDSAP256SHA256,
+	}
+	return &signer
+}
+
+func PilaRequestSignature(m *Msg) error {
+	addPilaTxtRecord(m, false, true, []byte{})
+	return nil
+}
+
+func PilaSign(m *Msg, signalg SignerWithAlgorithm, ip net.IP) error {
+	//todo(cyrill): adjust parameters
+	sigrr := createPilaSIG(signalg.Algorithm(), 0, "")
+	additionalInfo, err := sigrr.getAdditionalInfo(m, Encode(ip))
+	if err != nil {
+		return errors.New("Failed to extract additional info from request")
+	}
+	signedMsgPacked, err := sigrr.pilaSignRR(signalg.Signer(), m, additionalInfo)
+	signedMsg := new(Msg)
+	if err := signedMsg.Unpack(signedMsgPacked); err == nil {
+		return errors.New("Failed to unpack signed msg")
+	}
+	m = signedMsg
+	return nil
+}
+
+func PilaVerify(m *Msg, original *Msg, signalg PublicKeyWithAlgorithm, ip net.IP) error {
+	var originalRaw []byte
+	original.PackBuffer(originalRaw)
+
+	// SIG and RRSIG implement interface RR
+	var sigrr *SIG = readPilaSIG(m)
+
+	additionalInfo, err := sigrr.getAdditionalInfo(m, Encode(ip))
+	if err != nil {
+		return errors.New("Failed to extract additional info from request")
+	}
+
+	key := createPilaKEY(3, signalg.Algorithm(), signalg.PublicKeyBase64())
+
+	var buf []byte
+	error := sigrr.pilaVerifyRR(key, buf, additionalInfo)
+	return error
+}
+
 // encodes a ECDSA private/public key using pem encoding & x509 marshalling
-func encodeEcdsKeys(privateKey *ecdsa.PrivateKey, publicKey *ecdsa.PublicKey) (string, string) {
+func EncodeEcdsaKeys(privateKey *ecdsa.PrivateKey, publicKey *ecdsa.PublicKey) (string, string) {
 	x509Encoded, _ := x509.MarshalECPrivateKey(privateKey)
 	pemEncoded := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: x509Encoded})
 
@@ -33,47 +150,162 @@ func decodeEcdsaKeys(pemEncoded string, pemEncodedPub string) (*ecdsa.PrivateKey
 	return privateKey, publicKey
 }
 
-func readKeys(string priv, string pub) (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
-	asdf
-
-}
-
-func pilaSign(m *dns.Msg, priv *ecdsa.PrivateKey) error {
-
-	//client
-	m.SetQuestion("miek.nl.", TypeTXT)
-	r, _, err := c.Exchange(m, addrstr)
-	if err != nil || len(r.Extra) == 0 {
-		t.Fatal("failed to exchange miek.nl", err)
+func ReadKeys(priv string, pub string) (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
+	privKey, err := ioutil.ReadFile(priv)
+	if err != nil {
+		panic(err)
 	}
-	txt := r.Extra[0].(*TXT).Txt[0]
-	if txt != "Hello world" {
-		t.Error("unexpected result for miek.nl", txt, "!= Hello world")
+	pubKey, err := ioutil.ReadFile(pub)
+	if err != nil {
+		panic(err)
+	}
+	return decodeEcdsaKeys(string(privKey), string(pubKey))
+}
+
+func createPilaSIG(algorithm uint8, keyTag uint16, signerName string) *SIG {
+	now := uint32(time.Now().Unix())
+	sigrr := new(SIG)
+	sigrr.Hdr.Name = pilaSIGNameString
+	sigrr.Hdr.Rrtype = TypeSIG
+	sigrr.Hdr.Class = ClassANY
+	sigrr.Algorithm = algorithm
+	sigrr.Expiration = now + 300
+	sigrr.Inception = now - 300
+	sigrr.KeyTag = keyTag
+	sigrr.SignerName = signerName
+	return sigrr
+}
+
+func createPilaKEY(protocol uint8, algorithm uint8, publicKeyBase64 string) *KEY {
+	key := new(KEY)
+	key.Header().Name = pilaKEYNameString
+	key.Header().Rrtype = TypeKEY
+	key.Header().Class = ClassANY
+	key.Flags = 0
+	key.Protocol = protocol
+	key.Algorithm = algorithm
+	key.PublicKey = publicKeyBase64
+	return key
+}
+
+func readPilaSIG(m *Msg) *SIG {
+	rr := getLastExtraRecord(m, TypeSIG).(*SIG)
+	if rr != nil && rr.Header().Name == pilaSIGNameString {
+		return rr
+	}
+	return nil
+}
+
+type PilaTxtStruct struct {
+	Randomness     []byte
+	CertificateRaw []byte
+}
+
+type SourceIdentifier interface {
+	Encode() []byte
+}
+
+// https://www.iana.org/assignments/address-family-numbers/address-family-numbers.xhtml
+func Encode(ip net.IP) []byte {
+	var encoded []byte
+	if len(ip) == net.IPv4len || (len(ip) == net.IPv6len && bytes.Equal(ip, ip.To4())) {
+		encoded = append(encoded, uint8(pilaIPv4))
+		encoded = append(encoded, ip.To16()...)
+	} else if len(ip) == net.IPv6len {
+		encoded = append(encoded, uint8(pilaIPv6))
+		encoded = append(encoded, ip.To16()...)
+	}
+	return encoded
+}
+
+func addPilaTxtRecord(m *Msg, requestingSignature bool, providingSignature bool, certificateRaw []byte) error {
+	txtContent, error := createPilaTxtRecord(requestingSignature, providingSignature, certificateRaw)
+	if error != nil {
+		return error
+	}
+	var rr RR
+	rr = &TXT{Hdr: RR_Header{Name: ".pila", Rrtype: TypeTXT, Class: ClassINET, Ttl: 0}, Txt: []string{string(txtContent)}}
+	m.Extra = append(m.Extra, rr)
+	return nil
+}
+
+func getLastExtraRecord(m *Msg, typeCovered uint16) RR {
+	for i := len(m.Extra) - 1; i >= 0; i-- {
+		if m.Extra[i].Header().Rrtype == typeCovered {
+			return m.Extra[i]
+		}
+	}
+	return nil
+}
+
+func getPilaTxtRecord(m *Msg) (*PilaTxtStruct, error) {
+	// No additional records
+	if len(m.Extra) == 0 {
+		return nil, errors.New("No additional resource records present")
 	}
 
-	//server
-	m.Extra = make([]RR, 1)
-	m.Extra[0] = &TXT{Hdr: RR_Header{Name: m.Question[0].Name, Rrtype: TypeTXT, Class: ClassINET, Ttl: 0}, Txt: []string{"Hello world"}}
-}
-
-func createTxtRecord(requestingSignature bool, providingSignature bool) []byte {
-	var txt []byte
-
-	// use asn1 octet strings
-
-	if requestingSignature {
-		append(txt, []byte())
+	rr := getLastExtraRecord(m, TypeTXT).(*TXT)
+	if rr == nil {
+		return nil, errors.New("No txt records present")
 	}
+
+	// not pila txt record
+	if rr.Header().Name != pilaTxtNameString {
+		return nil, errors.New("Last txt record is not: " + pilaTxtNameString + " txt record")
+	}
+
+	if len(rr.Txt) == 0 {
+		return nil, errors.New("Empty txt record")
+	}
+	var s PilaTxtStruct
+	if _, err := asn1.Unmarshal([]byte(rr.Txt[0]), &s); err != nil {
+		return nil, errors.New("ASN1 Unmarshal failed: " + err.Error())
+	}
+	return &s, nil
 }
 
-func rand(size int) []byte {
-
+func createPilaTxtRecord(requestingSignature bool, providingSignature bool, certificateRaw []byte) ([]byte, error) {
+	//todo(cyrill): randomness length
+	txtStruct := PilaTxtStruct{Randomness: randofsize(8), CertificateRaw: certificateRaw}
+	txtEncoded, error := asn1.Marshal(txtStruct)
+	if error != nil {
+		return nil, errors.New("Cannot marshal PilaTxtStruct")
+	}
+	return txtEncoded, nil
 }
 
-// Sign signs a dns.Msg. It fills the signature with the appropriate data.
+func randofsize(size int) []byte {
+	//todo(cyrill): implement random function
+	var result []byte
+	start := byte('a')
+	for i := 0; i < size; i++ {
+		result = append(result, start)
+		start++
+	}
+	return result
+}
+
+func (rr *SIG) getAdditionalInfo(m *Msg, srcIdentifier []byte) ([]byte, error) {
+	hash, ok := AlgorithmToHash[rr.Algorithm]
+	if !ok {
+		return nil, ErrAlg
+	}
+
+	hasher := hash.New()
+	// Include the request if possible
+	if m.MsgHdr.Response {
+		hasher.Write(m.Request)
+	}
+	// Include the endpoint identifier to inhibit source address spoofing
+	hasher.Write(srcIdentifier)
+
+	return hasher.Sum(nil), nil
+}
+
+// Sign signs a Msg. It fills the signature with the appropriate data.
 // The SIG record should have the SignerName, KeyTag, Algorithm, Inception
 // and Expiration set.
-func (rr *SIG) pilaSignRR(k crypto.Signer, m *Msg) ([]byte, error) {
+func (rr *SIG) pilaSignRR(k crypto.Signer, m *Msg, additionalInfo []byte) ([]byte, error) {
 	if k == nil {
 		return nil, ErrPrivKey
 	}
@@ -112,6 +344,8 @@ func (rr *SIG) pilaSignRR(k crypto.Signer, m *Msg) ([]byte, error) {
 	hasher.Write(buf[len(mbuf)+1+2+2+4+2:])
 	// Write message
 	hasher.Write(buf[:len(mbuf)])
+	// Write additional info
+	hasher.Write(additionalInfo)
 
 	signature, err := sign(k, hasher.Sum(nil), hash, rr.Algorithm)
 	if err != nil {
@@ -138,7 +372,7 @@ func (rr *SIG) pilaSignRR(k crypto.Signer, m *Msg) ([]byte, error) {
 
 // Verify validates the message buf using the key k.
 // It's assumed that buf is a valid message from which rr was unpacked.
-func (rr *SIG) pilaVerifyRR(k *KEY, buf []byte) error {
+func (rr *SIG) pilaVerifyRR(k *KEY, buf []byte, additionalInfo []byte) error {
 	if k == nil {
 		return ErrKey
 	}
@@ -237,6 +471,8 @@ func (rr *SIG) pilaVerifyRR(k *KEY, buf []byte) error {
 		byte(adc - 1),
 	})
 	hasher.Write(buf[12:bodyend])
+	// Write additional info
+	hasher.Write(additionalInfo)
 
 	hashed := hasher.Sum(nil)
 	sig := buf[sigend:]
