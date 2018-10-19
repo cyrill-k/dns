@@ -63,6 +63,7 @@ func handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
 func main() {
 	generateKeys := flag.Bool("gen", false, "generate new public/private ECDSA keys")
 	keyFolder := flag.String("genfolder", "-", "folder where the ECDSA keys are saved")
+	debugFlag := flag.Bool("debug", false, "Enable debug mode")
 	flag.Parse()
 
 	if *keyFolder == "-" {
@@ -88,7 +89,37 @@ func main() {
 	}
 
 	priv, _ := dns.ReadKeys(privPath, pubPath)
-	signer = dns.NewECDSASigner(priv)
+	signer := dns.NewECDSASigner(priv)
+
+	_, pub := dns.ReadKeys(privPath, pubPath)
+	verifier := dns.NewECDSAPublicKey(pub)
+
+	if *debugFlag {
+		req := new(dns.Msg)
+		req.SetQuestion("test.service.", dns.TypeA)
+		dns.DebugPrint("req1", req)
+		dns.PilaRequestSignature(req)
+		dns.DebugPrint("req2", req)
+
+		response := req.Copy()
+		response.SetReply(req)
+		response.Compress = false
+		parseQuery(response)
+		dns.DebugPrint("response1", response)
+
+		host := "127.0.0.1"
+		if error := dns.PilaSign(response, signer, net.ParseIP(host)); error != nil {
+			log.Println("Error in PilaSign: " + error.Error())
+		}
+		dns.DebugPrint("response2", response)
+
+		if error := dns.PilaVerify(response, req, verifier, net.ParseIP(host)); error != nil {
+			log.Println("Error in PilaVerify: " + error.Error())
+		}
+		dns.DebugPrint("response3", response)
+
+		return
+	}
 
 	// attach request handler func
 	dns.HandleFunc("service.", handleDnsRequest)

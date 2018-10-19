@@ -7,11 +7,15 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"io/ioutil"
+	"log"
 	"math/big"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,9 +27,9 @@ import (
 type EndpointIdentifierType int
 
 const (
-	pilaTxtNameString                        = ".pila"
-	pilaSIGNameString                        = ".pila"
-	pilaKEYNameString                        = ".pila"
+	pilaTxtNameString                        = "txt.pila."
+	pilaSIGNameString                        = "sig.pila."
+	pilaKEYNameString                        = "key.pila."
 	pilaIPv4          EndpointIdentifierType = 1
 	pilaIPv6          EndpointIdentifierType = 2
 	pilaScion         EndpointIdentifierType = 100 // temporary assignment
@@ -60,7 +64,6 @@ func (signer *ECDSASigner) Algorithm() uint8 {
 }
 
 func (pub *ECDSAPublicKey) PublicKeyBase64() string {
-	var buffer []byte
 	var lenbuf int
 	switch pub.PublicKey.Curve {
 	case elliptic.P256():
@@ -68,6 +71,12 @@ func (pub *ECDSAPublicKey) PublicKeyBase64() string {
 	case elliptic.P384():
 		lenbuf = 96
 	}
+	buffer := make([]byte, lenbuf)
+	log.Println("last byte = " + strconv.Itoa(int(buffer[lenbuf-1])) + "lenbuf/2=" + strconv.Itoa(lenbuf/2))
+	log.Println("pub length = " + strconv.Itoa(lenbuf) + ", pub X.Bytes() length = " + strconv.Itoa(len(pub.PublicKey.X.Bytes())) + ", pub Y.Bytes() length = " + strconv.Itoa(len(pub.PublicKey.Y.Bytes())))
+	log.Println("buf len = " + strconv.Itoa(len(buffer[:lenbuf/2])) + ", pubkey len = " + strconv.Itoa(len(pub.PublicKey.X.Bytes())))
+	log.Println("buf len = " + strconv.Itoa(len(buffer[lenbuf/2:])) + ", pubkey len = " + strconv.Itoa(len(pub.PublicKey.Y.Bytes())))
+	//TODO: fix
 	copy(buffer[:lenbuf/2], pub.PublicKey.X.Bytes())
 	copy(buffer[lenbuf/2:], pub.PublicKey.Y.Bytes())
 	return toBase64(buffer)
@@ -85,41 +94,78 @@ func NewECDSASigner(privateKey *ecdsa.PrivateKey) SignerWithAlgorithm {
 	return &signer
 }
 
+func NewECDSAPublicKey(publicKey *ecdsa.PublicKey) PublicKeyWithAlgorithm {
+	signer := ECDSAPublicKey{
+		PublicKey:      publicKey,
+		AlgorithmValue: ECDSAP256SHA256,
+	}
+	return &signer
+}
+
 func PilaRequestSignature(m *Msg) error {
 	addPilaTxtRecord(m, false, true, []byte{})
 	return nil
 }
 
+func DebugPrint(msgName string, m *Msg) {
+	log.Println("\n***** " + msgName + ": \n" + m.String() + "\n*****\n\n")
+}
+
+func GenerateKeyTag() uint16 {
+	return 42
+}
+
 func PilaSign(m *Msg, signalg SignerWithAlgorithm, ip net.IP) error {
 	//todo(cyrill): adjust parameters
-	sigrr := createPilaSIG(signalg.Algorithm(), 0, "")
-	additionalInfo, err := sigrr.getAdditionalInfo(m, Encode(ip))
+	sigrr := createPilaSIG(signalg.Algorithm(), GenerateKeyTag(), pilaSIGNameString)
+	additionalInfo, err := sigrr.getAdditionalInfo(m.Request, Encode(ip))
 	if err != nil {
 		return errors.New("Failed to extract additional info from request")
 	}
+	log.Println(additionalInfo)
 	signedMsgPacked, err := sigrr.pilaSignRR(signalg.Signer(), m, additionalInfo)
-	signedMsg := new(Msg)
-	if err := signedMsg.Unpack(signedMsgPacked); err == nil {
-		return errors.New("Failed to unpack signed msg")
+	if err != nil {
+		return errors.New("Failed PILA signature: " + err.Error())
 	}
-	m = signedMsg
+
+	// testPacked, err := sigrr.Sign(signalg.Signer(), m)
+	testPacked, err := m.Pack()
+	test := new(Msg)
+	test.Unpack(testPacked)
+	DebugPrint("test", test)
+	//signedMsg := new(Msg)
+	if err := m.Unpack(signedMsgPacked); err != nil {
+		return errors.New("Failed to unpack signed msg: " + err.Error())
+	}
+	//m = *signedMsg
 	return nil
 }
 
 func PilaVerify(m *Msg, original *Msg, signalg PublicKeyWithAlgorithm, ip net.IP) error {
+	// SIG and RRSIG implement interface RR
+	sigrr, err := getPilaSIG(m)
+	if err != nil {
+		return errors.New("Error reading last SIG record from dns message: " + err.Error())
+	}
+	if sigrr == nil {
+		return errors.New("No PILA SIG record available")
+	}
+	if signalg.Algorithm() != sigrr.Algorithm {
+		return errors.New("Returned algrithm does not match expected algorithm")
+	}
+
+	// Create verification context based on original message
 	var originalRaw []byte
 	original.PackBuffer(originalRaw)
-
-	// SIG and RRSIG implement interface RR
-	var sigrr *SIG = readPilaSIG(m)
-
-	additionalInfo, err := sigrr.getAdditionalInfo(m, Encode(ip))
+	additionalInfo, err := sigrr.getAdditionalInfo(originalRaw, Encode(ip))
 	if err != nil {
 		return errors.New("Failed to extract additional info from request")
 	}
 
+	// Create dns.KEY object to verify signature
 	key := createPilaKEY(3, signalg.Algorithm(), signalg.PublicKeyBase64())
 
+	// Verify signature
 	var buf []byte
 	error := sigrr.pilaVerifyRR(key, buf, additionalInfo)
 	return error
@@ -162,17 +208,35 @@ func ReadKeys(priv string, pub string) (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
 	return decodeEcdsaKeys(string(privKey), string(pubKey))
 }
 
+func FromBase64(s []byte) (buf []byte, err error) {
+	buflen := base64.StdEncoding.DecodedLen(len(s))
+	buf = make([]byte, buflen)
+	n, err := base64.StdEncoding.Decode(buf, s)
+	buf = buf[:n]
+	return
+}
+
 func createPilaSIG(algorithm uint8, keyTag uint16, signerName string) *SIG {
 	now := uint32(time.Now().Unix())
 	sigrr := new(SIG)
-	sigrr.Hdr.Name = pilaSIGNameString
-	sigrr.Hdr.Rrtype = TypeSIG
-	sigrr.Hdr.Class = ClassANY
+	// values set in pilaSignRR()
+	//sigrr.Header().Name = "."
+	//sigrr.Header().Rrtype = TypeSIG
+	//sigrr.Header().Class = ClassANY
+	//sigrr.Header().Ttl = 0
+	//sigrr.OrigTtl = 0
+	//sigrr.TypeCovered = 0
+	//sigrr.Labels = 0
 	sigrr.Algorithm = algorithm
 	sigrr.Expiration = now + 300
 	sigrr.Inception = now - 300
 	sigrr.KeyTag = keyTag
 	sigrr.SignerName = signerName
+	//sigrr.Signature = "" default value
+	domainNameLength, _ := PackDomainName(sigrr.SignerName, nil, 0, nil, false)
+	signatureWireFormat, _ := FromBase64([]byte(sigrr.Signature))
+	signatureWireLength := len(signatureWireFormat)
+	sigrr.Header().Rdlength = 2 + 1 + 1 + 4 + 4 + 4 + 2 + uint16(domainNameLength) + uint16(signatureWireLength)
 	return sigrr
 }
 
@@ -188,12 +252,19 @@ func createPilaKEY(protocol uint8, algorithm uint8, publicKeyBase64 string) *KEY
 	return key
 }
 
-func readPilaSIG(m *Msg) *SIG {
-	rr := getLastExtraRecord(m, TypeSIG).(*SIG)
-	if rr != nil && rr.Header().Name == pilaSIGNameString {
-		return rr
+func getPilaSIG(m *Msg) (*SIG, error) {
+	rr := getLastExtraRecord(m, TypeSIG)
+	if rr == nil {
+		return nil, errors.New("No Extra TypeSIG record available")
 	}
-	return nil
+	sig, ok := rr.(*SIG)
+	if !ok {
+		return nil, errors.New("Last Extra record with type TypeSIG cannot be transformed into a SIG record")
+	}
+	if sig.SignerName != pilaSIGNameString {
+		return nil, errors.New("Last Extra SIG record is not a PILA SIG record")
+	}
+	return rr.(*SIG), nil
 }
 
 type PilaTxtStruct struct {
@@ -224,7 +295,7 @@ func addPilaTxtRecord(m *Msg, requestingSignature bool, providingSignature bool,
 		return error
 	}
 	var rr RR
-	rr = &TXT{Hdr: RR_Header{Name: ".pila", Rrtype: TypeTXT, Class: ClassINET, Ttl: 0}, Txt: []string{string(txtContent)}}
+	rr = &TXT{Hdr: RR_Header{Name: pilaTxtNameString, Rrtype: TypeTXT, Class: ClassINET, Ttl: 0}, Txt: []string{string(txtContent)}}
 	m.Extra = append(m.Extra, rr)
 	return nil
 }
@@ -285,7 +356,7 @@ func randofsize(size int) []byte {
 	return result
 }
 
-func (rr *SIG) getAdditionalInfo(m *Msg, srcIdentifier []byte) ([]byte, error) {
+func (rr *SIG) getAdditionalInfo(request []byte, srcIdentifier []byte) ([]byte, error) {
 	hash, ok := AlgorithmToHash[rr.Algorithm]
 	if !ok {
 		return nil, ErrAlg
@@ -293,13 +364,79 @@ func (rr *SIG) getAdditionalInfo(m *Msg, srcIdentifier []byte) ([]byte, error) {
 
 	hasher := hash.New()
 	// Include the request if possible
-	if m.MsgHdr.Response {
-		hasher.Write(m.Request)
-	}
+	hasher.Write(request)
+
 	// Include the endpoint identifier to inhibit source address spoofing
 	hasher.Write(srcIdentifier)
 
 	return hasher.Sum(nil), nil
+}
+
+func logSliceStringHex(identifier string, from int, length int, buffer []byte, b *strings.Builder) int {
+	hexString := hex.EncodeToString(buffer[from : from+length])
+	b.Write([]byte(", " + identifier + "(" + strconv.Itoa(from) + ":" + strconv.Itoa(from+length) + ") = " + hexString))
+	return from + length
+}
+
+func logSliceStringDomainName(identifier string, from int, length int, buffer []byte, b *strings.Builder) int {
+	b.Write([]byte(", " + identifier + "(" + strconv.Itoa(from) + ":" + strconv.Itoa(from+length) + ") = "))
+
+	var counter uint8
+	var i int
+	for ; i < length || length == 0; i++ {
+		if counter == 0 {
+			counter = uint8(buffer[from+i])
+			b.Write([]byte("[" + strconv.FormatUint(uint64(counter), 10) + "]"))
+			if counter == 0 {
+				break
+			}
+		} else {
+			b.Write(buffer[from+i : from+i+1])
+			counter--
+		}
+	}
+	return from + i + 1
+}
+
+func logSliceStringString(identifier string, from int, length int, buffer []byte, b *strings.Builder) int {
+	rawString := string(buffer[from : from+length])
+	b.Write([]byte(", " + identifier + "(" + strconv.Itoa(from) + ":" + strconv.Itoa(from+length) + ") = " + rawString))
+	return from + length
+}
+
+func logSliceString8(identifier string, from int, buffer []byte, b *strings.Builder) int {
+	b.Write([]byte(", " + identifier + "(" + strconv.Itoa(from) + ":" + strconv.Itoa(from+1) + ") = " + strconv.FormatUint(uint64(buffer[from]), 10)))
+	return from + 1
+}
+
+func logSliceString16(identifier string, from int, buffer []byte, b *strings.Builder) int {
+	b.Write([]byte(", " + identifier + "(" + strconv.Itoa(from) + ":" + strconv.Itoa(from+2) + ") = " + strconv.FormatUint(uint64(binary.BigEndian.Uint16(buffer[from:from+2])), 10)))
+	return from + 2
+}
+
+func logSliceString32(identifier string, from int, buffer []byte, b *strings.Builder) int {
+	b.Write([]byte(", " + identifier + "(" + strconv.Itoa(from) + ":" + strconv.Itoa(from+4) + ") = " + strconv.FormatUint(uint64(binary.BigEndian.Uint32(buffer[from:from+4])), 10)))
+	return from + 4
+}
+
+func LogSIG(data []byte, lengthHeaderName int, lengthSignerName int, totalLength int) string {
+	var off int
+	builder := new(strings.Builder)
+	off = logSliceStringDomainName("Header.Name", off, 15, data, builder)
+	off = logSliceString16("Header.Rrtype", off, data, builder)
+	off = logSliceString16("Header.Class", off, data, builder)
+	off = logSliceString32("Header.Ttl", off, data, builder)
+	off = logSliceString16("Header.Rdlength", off, data, builder)
+	off = logSliceString16("TypeCovered", off, data, builder)
+	off = logSliceString8("Algorithm", off, data, builder)
+	off = logSliceString8("Labels", off, data, builder)
+	off = logSliceString32("OrigTtl", off, data, builder)
+	off = logSliceString32("Expiration", off, data, builder)
+	off = logSliceString32("Inception", off, data, builder)
+	off = logSliceString16("KeyTag", off, data, builder)
+	off = logSliceStringDomainName("SignerName", off, 15, data, builder)
+	off = logSliceStringHex("Signature", off, totalLength-off, data, builder)
+	return builder.String()
 }
 
 // Sign signs a Msg. It fills the signature with the appropriate data.
@@ -310,6 +447,9 @@ func (rr *SIG) pilaSignRR(k crypto.Signer, m *Msg, additionalInfo []byte) ([]byt
 		return nil, ErrPrivKey
 	}
 	if rr.KeyTag == 0 || len(rr.SignerName) == 0 || rr.Algorithm == 0 {
+		log.Println(strconv.FormatUint(uint64(rr.KeyTag), 10))
+		log.Println(rr.SignerName)
+		log.Println(strconv.FormatUint(uint64(rr.Algorithm), 10))
 		return nil, ErrKey
 	}
 	rr.Header().Rrtype = TypeSIG
@@ -319,6 +459,21 @@ func (rr *SIG) pilaSignRR(k crypto.Signer, m *Msg, additionalInfo []byte) ([]byt
 	rr.OrigTtl = 0
 	rr.TypeCovered = 0
 	rr.Labels = 0
+
+	// // Testing SIG pack and unpack methods
+	// testbuf := make([]byte, 1000)
+	// if _, err := rr.pack(testbuf, 0, nil, false); err != nil {
+	// 	log.Println("Error packing TEST SIG: " + err.Error())
+	// }
+	// header, offTest, _, err := unpackHeader(testbuf, 0)
+	// if err != nil {
+	// 	log.Println("Error unpacking TEST SIG header: " + err.Error())
+	// }
+	// testUnpacked, offTest, err := unpackSIG(header, testbuf, offTest)
+	// if err != nil {
+	// 	log.Println("Error unpacking TEST SIG: " + err.Error())
+	// }
+	// log.Println("SIG packing/unpacking: DeepEqual() = " + strconv.FormatBool(reflect.DeepEqual(rr, testUnpacked)))
 
 	buf := make([]byte, m.Len()+rr.len())
 	mbuf, err := m.PackBuffer(buf)
@@ -342,6 +497,10 @@ func (rr *SIG) pilaSignRR(k crypto.Signer, m *Msg, additionalInfo []byte) ([]byt
 	hasher := hash.New()
 	// Write SIG rdata
 	hasher.Write(buf[len(mbuf)+1+2+2+4+2:])
+
+	// log.Print("buf after content (excluding SIGRR): ")
+	// log.Println(buf[len(mbuf) : len(mbuf)+1+2+2+4+2])
+
 	// Write message
 	hasher.Write(buf[:len(mbuf)])
 	// Write additional info
@@ -351,6 +510,8 @@ func (rr *SIG) pilaSignRR(k crypto.Signer, m *Msg, additionalInfo []byte) ([]byt
 	if err != nil {
 		return nil, err
 	}
+
+	//log.Println("Before sign: " + LogSIG(buf[len(mbuf):], 15, 15, len(buf)-len(mbuf)))
 
 	rr.Signature = toBase64(signature)
 
@@ -367,6 +528,9 @@ func (rr *SIG) pilaSignRR(k crypto.Signer, m *Msg, additionalInfo []byte) ([]byt
 	adc := binary.BigEndian.Uint16(buf[10:])
 	adc++
 	binary.BigEndian.PutUint16(buf[10:], adc)
+
+	//log.Println("After sign: " + LogSIG(buf[len(mbuf):], 15, 15, len(buf)-len(mbuf)))
+
 	return buf, nil
 }
 
