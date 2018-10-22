@@ -29,7 +29,7 @@ type EndpointIdentifierType int
 const (
 	pilaTxtNameString                        = "txt.pila."
 	pilaSIGNameString                        = "sig.pila."
-	pilaKEYNameString                        = "key.pila."
+	pilaKEYNameString                        = "sig.pila."
 	pilaIPv4          EndpointIdentifierType = 1
 	pilaIPv6          EndpointIdentifierType = 2
 	pilaScion         EndpointIdentifierType = 100 // temporary assignment
@@ -72,13 +72,16 @@ func (pub *ECDSAPublicKey) PublicKeyBase64() string {
 		lenbuf = 96
 	}
 	buffer := make([]byte, lenbuf)
-	log.Println("last byte = " + strconv.Itoa(int(buffer[lenbuf-1])) + "lenbuf/2=" + strconv.Itoa(lenbuf/2))
-	log.Println("pub length = " + strconv.Itoa(lenbuf) + ", pub X.Bytes() length = " + strconv.Itoa(len(pub.PublicKey.X.Bytes())) + ", pub Y.Bytes() length = " + strconv.Itoa(len(pub.PublicKey.Y.Bytes())))
-	log.Println("buf len = " + strconv.Itoa(len(buffer[:lenbuf/2])) + ", pubkey len = " + strconv.Itoa(len(pub.PublicKey.X.Bytes())))
-	log.Println("buf len = " + strconv.Itoa(len(buffer[lenbuf/2:])) + ", pubkey len = " + strconv.Itoa(len(pub.PublicKey.Y.Bytes())))
-	//TODO: fix
+	// log.Println("last byte = " + strconv.Itoa(int(buffer[lenbuf-1])) + "lenbuf/2=" + strconv.Itoa(lenbuf/2))
+	// log.Println("pub length = " + strconv.Itoa(lenbuf) + ", pub X.Bytes() length = " + strconv.Itoa(len(pub.PublicKey.X.Bytes())) + ", pub Y.Bytes() length = " + strconv.Itoa(len(pub.PublicKey.Y.Bytes())))
+	// log.Println("buf len = " + strconv.Itoa(len(buffer[:lenbuf/2])) + ", pubkey len = " + strconv.Itoa(len(pub.PublicKey.X.Bytes())))
+	// log.Println("buf len = " + strconv.Itoa(len(buffer[lenbuf/2:])) + ", pubkey len = " + strconv.Itoa(len(pub.PublicKey.Y.Bytes())))
 	copy(buffer[:lenbuf/2], pub.PublicKey.X.Bytes())
 	copy(buffer[lenbuf/2:], pub.PublicKey.Y.Bytes())
+	// log.Println("test before return: " + strconv.Itoa(len(buffer)))
+	// x := base64.StdEncoding.EncodeToString(buffer)
+	// log.Println("test2: " + x)
+	// return x
 	return toBase64(buffer)
 }
 
@@ -87,17 +90,31 @@ func (pub *ECDSAPublicKey) Algorithm() uint8 {
 }
 
 func NewECDSASigner(privateKey *ecdsa.PrivateKey) SignerWithAlgorithm {
+	var algorithm uint8
+	switch privateKey.Curve {
+	case elliptic.P256():
+		algorithm = ECDSAP256SHA256
+	case elliptic.P384():
+		algorithm = ECDSAP384SHA384
+	}
 	signer := ECDSASigner{
 		PrivateKey:     privateKey,
-		AlgorithmValue: ECDSAP256SHA256,
+		AlgorithmValue: algorithm,
 	}
 	return &signer
 }
 
 func NewECDSAPublicKey(publicKey *ecdsa.PublicKey) PublicKeyWithAlgorithm {
+	var algorithm uint8
+	switch publicKey.Curve {
+	case elliptic.P256():
+		algorithm = ECDSAP256SHA256
+	case elliptic.P384():
+		algorithm = ECDSAP384SHA384
+	}
 	signer := ECDSAPublicKey{
 		PublicKey:      publicKey,
-		AlgorithmValue: ECDSAP256SHA256,
+		AlgorithmValue: algorithm,
 	}
 	return &signer
 }
@@ -166,7 +183,10 @@ func PilaVerify(m *Msg, original *Msg, signalg PublicKeyWithAlgorithm, ip net.IP
 	key := createPilaKEY(3, signalg.Algorithm(), signalg.PublicKeyBase64())
 
 	// Verify signature
-	var buf []byte
+	buf, err := m.Pack()
+	if err != nil {
+		return errors.New("Failed to pack message: " + err.Error())
+	}
 	error := sigrr.pilaVerifyRR(key, buf, additionalInfo)
 	return error
 }
@@ -241,6 +261,7 @@ func createPilaSIG(algorithm uint8, keyTag uint16, signerName string) *SIG {
 }
 
 func createPilaKEY(protocol uint8, algorithm uint8, publicKeyBase64 string) *KEY {
+	log.Println("createPilaKey")
 	key := new(KEY)
 	key.Header().Name = pilaKEYNameString
 	key.Header().Rrtype = TypeKEY
@@ -537,6 +558,8 @@ func (rr *SIG) pilaSignRR(k crypto.Signer, m *Msg, additionalInfo []byte) ([]byt
 // Verify validates the message buf using the key k.
 // It's assumed that buf is a valid message from which rr was unpacked.
 func (rr *SIG) pilaVerifyRR(k *KEY, buf []byte, additionalInfo []byte) error {
+	log.Println("pilaVerifyRR: len(buf) = " + strconv.Itoa(len(buf)) + ", len(addInfo) = " + strconv.Itoa(len(additionalInfo)))
+
 	if k == nil {
 		return ErrKey
 	}
@@ -622,6 +645,7 @@ func (rr *SIG) pilaVerifyRR(k *KEY, buf []byte, additionalInfo []byte) error {
 	if err != nil {
 		return err
 	}
+	log.Println("Unpacked everything")
 	// If key has come from the DNS name compression might
 	// have mangled the case of the name
 	if strings.ToLower(signername) != strings.ToLower(k.Header().Name) {
@@ -637,6 +661,8 @@ func (rr *SIG) pilaVerifyRR(k *KEY, buf []byte, additionalInfo []byte) error {
 	hasher.Write(buf[12:bodyend])
 	// Write additional info
 	hasher.Write(additionalInfo)
+
+	log.Println("k.Algorithm = "+strconv.FormatUint(uint64(k.Algorithm), 10)+", ECDSAP256SHA256 = "+strconv.FormatUint(uint64(ECDSAP256SHA256), 10), ", ECDSAP384SHA384 = "+strconv.FormatUint(uint64(ECDSAP384SHA384), 10))
 
 	hashed := hasher.Sum(nil)
 	sig := buf[sigend:]
@@ -665,6 +691,7 @@ func (rr *SIG) pilaVerifyRR(k *KEY, buf []byte, additionalInfo []byte) error {
 		r.SetBytes(sig[:len(sig)/2])
 		s := big.NewInt(0)
 		s.SetBytes(sig[len(sig)/2:])
+		log.Println("ECDSA: X = " + pk.X.String() + ", Y = " + pk.Y.String())
 		if pk != nil {
 			if ecdsa.Verify(pk, hashed, r, s) {
 				return nil

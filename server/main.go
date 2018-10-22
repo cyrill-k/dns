@@ -73,7 +73,7 @@ func main() {
 	pubPath := filepath.Join(*keyFolder, "public.pem")
 
 	if *generateKeys {
-		privateKey, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+		privateKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		publicKey := privateKey.PublicKey
 
 		encPriv, encPub := dns.EncodeEcdsaKeys(privateKey, &publicKey)
@@ -117,6 +117,8 @@ func main() {
 			log.Println("Error in PilaVerify: " + error.Error())
 		}
 		dns.DebugPrint("response3", response)
+
+		//TODO: write tests
 
 		return
 	}
