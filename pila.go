@@ -22,6 +22,8 @@ import (
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/pem"
+
+	"github.com/scionproto/scion/go/lib/crypto/trc"
 )
 
 type EndpointIdentifierType int
@@ -117,6 +119,54 @@ func NewECDSAPublicKey(publicKey *ecdsa.PublicKey) PublicKeyWithAlgorithm {
 		AlgorithmValue: algorithm,
 	}
 	return &signer
+}
+
+type PilaGeneralCertificate interface {
+	Pack() ([]byte, error)
+}
+
+type PilaVerifyingCertificate interface {
+	PilaGeneralCertificate
+	Verify(content []byte) error
+	VerifyCertificate(certificate PilaGeneralCertificate) error
+}
+
+type PilaSigningCertificate interface {
+	PilaGeneralCertificate
+	Sign(content []byte) ([]byte, error)
+}
+
+// Not used? server -> signing, client -> verifying
+type PilaFullCertificate interface {
+	PilaVerifyingCertificate
+	PilaSigningCertificate
+}
+
+type ScionTrc struct {
+	trc trc.TRC
+}
+
+func (*ScionTrc) VerifySignature(content []byte) error {
+	//todo(cyrill):
+
+	return nil, errors.New("TRC certificate can only verify AS level certificates")
+}
+
+func (trc *ScionTrc) VerifyCertificate(certificate PilaGeneralCertificate) error {
+	return trc.VerifySignature(certificate.Pack())
+}
+
+func LoadRootOfTrustCertificate(path string) (PilaCertificate, error) {
+
+	return nil, nil
+}
+
+func PilaRequestASSignature(publicKey PublicKeyWithAlgorithm) (PilaCertificate, error) {
+	return nil, nil
+}
+
+func PilaRequestRootOfTrustCertificate() (PilaCertificate, error) {
+	return nil, nil
 }
 
 func PilaRequestSignature(m *Msg) error {
