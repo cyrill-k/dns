@@ -23,7 +23,10 @@ import (
 	"encoding/asn1"
 	"encoding/pem"
 
-	"github.com/scionproto/scion/go/lib/crypto/trc"
+	"github.com/scionproto/scion/go/lib/addr"
+	"github.com/scionproto/scion/go/lib/ctrl/cert_mgmt"
+	"github.com/scionproto/scion/go/lib/sciond"
+	"github.com/scionproto/scion/go/lib/snet"
 )
 
 type EndpointIdentifierType int
@@ -45,6 +48,20 @@ type SignerWithAlgorithm interface {
 type PublicKeyWithAlgorithm interface {
 	PublicKeyBase64() string
 	Algorithm() uint8
+}
+
+type PilaConfig struct {
+	lAddr, csAddr              *snet.Addr
+	lIA                        addr.IA
+	sciondPath, dispatcherPath string
+}
+
+func (signalg SignerWithAlgorithm) GetPublicKey() (PublicKeyWithAlgorithm, error) {
+	switch signalg.Signer().(type) {
+	case ECDSASigner:
+		return NewECDSAPublicKey(signalg.Signer().PublicKey.(*ecdsa.PublicKey), signalg.Algorithm()), nil
+	}
+	return nil, errors.New("Unsupported private key cannot be converted into public key")
 }
 
 type ECDSASigner struct {
@@ -138,34 +155,43 @@ type PilaSigningCertificate interface {
 
 // Not used? server -> signing, client -> verifying
 type PilaFullCertificate interface {
-	PilaVerifyingCertificate
-	PilaSigningCertificate
+	PilaGeneralCertificate
+	Verify(content []byte) error
+	VerifyCertificate(certificate PilaGeneralCertificate) error
+	Sign(content []byte) ([]byte, error)
 }
 
 type ScionTrc struct {
-	trc trc.TRC
+	trc cert_mgmt.TRC
 }
 
 func (*ScionTrc) VerifySignature(content []byte) error {
 	//todo(cyrill):
 
-	return nil, errors.New("TRC certificate can only verify AS level certificates")
+	return errors.New("TODO")
 }
 
 func (trc *ScionTrc) VerifyCertificate(certificate PilaGeneralCertificate) error {
-	return trc.VerifySignature(certificate.Pack())
+	rawCert, err := certificate.Pack()
+	if err != nil {
+		return err
+	}
+	return trc.VerifySignature(rawCert)
 }
 
-func LoadRootOfTrustCertificate(path string) (PilaCertificate, error) {
+func LoadRootOfTrustCertificate(path string) (PilaGeneralCertificate, error) {
 
 	return nil, nil
 }
 
-func PilaRequestASSignature(publicKey PublicKeyWithAlgorithm) (PilaCertificate, error) {
+func PilaRequestASSignature(lAddr, csAddr *snet.Addr, publicKey PublicKeyWithAlgorithm) (PilaGeneralCertificate, error) {
+	snet.Init(addr.IAFromString("17-1039"), sciond.GetDefaultSCIONDPath(nil), "/run/shm/dispatcher/default.sock")
+	n := snet.DialSCION("udp4", lAddr, csAddr)
+
 	return nil, nil
 }
 
-func PilaRequestRootOfTrustCertificate() (PilaCertificate, error) {
+func PilaRequestRootOfTrustCertificate() (PilaGeneralCertificate, error) {
 	return nil, nil
 }
 
@@ -182,10 +208,15 @@ func GenerateKeyTag() uint16 {
 	return 42
 }
 
-func PilaSign(m *Msg, signalg SignerWithAlgorithm, ip net.IP) error {
+func (conf *PilaConfig) PilaSign(m *Msg, signalg SignerWithAlgorithm) error {
+	pub, err := signalg.GetPublicKey()
+	if err != nil {
+		return errors.New("Failed to extract public key to send to the certificate server: " + err.Error())
+	}
+	cert, err := PilaRequestASSignature(snet.AddrFromString("127.0.0.1"), certServerAddress, pub)
 	//todo(cyrill): adjust parameters
 	sigrr := createPilaSIG(signalg.Algorithm(), GenerateKeyTag(), pilaSIGNameString)
-	additionalInfo, err := sigrr.getAdditionalInfo(m.Request, Encode(ip))
+	additionalInfo, err := sigrr.getAdditionalInfo(m.Request, Encode(conf.lAddr.Host.IP()))
 	if err != nil {
 		return errors.New("Failed to extract additional info from request")
 	}
@@ -208,7 +239,7 @@ func PilaSign(m *Msg, signalg SignerWithAlgorithm, ip net.IP) error {
 	return nil
 }
 
-func PilaVerify(m *Msg, original *Msg, signalg PublicKeyWithAlgorithm, ip net.IP) error {
+func (conf *PilaConfig) PilaVerify(m *Msg, original *Msg, signalg PublicKeyWithAlgorithm, remoteIp net.IP) error {
 	// SIG and RRSIG implement interface RR
 	sigrr, err := getPilaSIG(m)
 	if err != nil {
@@ -224,7 +255,7 @@ func PilaVerify(m *Msg, original *Msg, signalg PublicKeyWithAlgorithm, ip net.IP
 	// Create verification context based on original message
 	var originalRaw []byte
 	original.PackBuffer(originalRaw)
-	additionalInfo, err := sigrr.getAdditionalInfo(originalRaw, Encode(ip))
+	additionalInfo, err := sigrr.getAdditionalInfo(originalRaw, Encode(remoteIp))
 	if err != nil {
 		return errors.New("Failed to extract additional info from request")
 	}
