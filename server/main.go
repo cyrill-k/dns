@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -20,6 +21,8 @@ var records = map[string]string{
 }
 
 var signer dns.SignerWithAlgorithm
+
+var config dns.PilaConfig
 
 func parseQuery(m *dns.Msg) {
 	for _, q := range m.Question {
@@ -52,7 +55,7 @@ func handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
 		log.Printf("Error retrieving IP address: ", error.Error())
 	}
 
-	error = dns.PilaSign(m, signer, net.ParseIP(host))
+	error = config.PilaSign(m, signer, net.ParseIP(host))
 	if error != nil {
 		log.Printf("Error signing response: ", error.Error())
 	}
@@ -64,7 +67,10 @@ func main() {
 	generateKeys := flag.Bool("gen", false, "generate new public/private ECDSA keys")
 	keyFolder := flag.String("genfolder", "-", "folder where the ECDSA keys are saved")
 	debugFlag := flag.Bool("debug", false, "Enable debug mode")
+	testingFlag := flag.Bool("test", false, "Enable testing mode")
 	flag.Parse()
+
+	config = dns.DefaultConfig()
 
 	if *keyFolder == "-" {
 		*keyFolder = "/home/cyrill/test/"
@@ -89,7 +95,7 @@ func main() {
 	}
 
 	priv, _ := dns.ReadKeys(privPath, pubPath)
-	signer := dns.NewECDSASigner(priv)
+	signer = dns.NewECDSASigner(priv)
 
 	_, pub := dns.ReadKeys(privPath, pubPath)
 	verifier := dns.NewECDSAPublicKey(pub)
@@ -108,17 +114,34 @@ func main() {
 		dns.DebugPrint("response1", response)
 
 		host := "127.0.0.1"
-		if error := dns.PilaSign(response, signer, net.ParseIP(host)); error != nil {
+		if error := config.PilaSign(response, signer, net.ParseIP(host)); error != nil {
 			log.Println("Error in PilaSign: " + error.Error())
 		}
 		dns.DebugPrint("response2", response)
 
-		if error := dns.PilaVerify(response, req, verifier, net.ParseIP(host)); error != nil {
+		if error := config.PilaVerify(response, req, verifier, net.ParseIP(host)); error != nil {
 			log.Println("Error in PilaVerify: " + error.Error())
 		}
 		dns.DebugPrint("response3", response)
 
 		//TODO: write tests
+
+		return
+	}
+
+	if *testingFlag {
+		s := &S{Ivalue: &Impl1{val: "test"}}
+		marshalled, err := json.Marshal(s)
+		if err != nil {
+			panic(err.Error())
+		}
+		log.Println(string(marshalled))
+		sNew := &S{}
+		err = json.Unmarshal(marshalled, sNew)
+		if err != nil {
+			panic(err.Error())
+		}
+		log.Println("val = " + sNew.Ivalue.f())
 
 		return
 	}
@@ -135,4 +158,46 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to start server: %s\n ", err.Error())
 	}
+}
+
+type I interface {
+	MarshalText() ([]byte, error)
+	UnmarshalText(text []byte) error
+	f() string
+}
+
+const (
+	type1 uint8 = 7
+	type2 uint8 = 42
+)
+
+type Istruct struct {
+	typeFieldHidden uint8
+	impl            I
+}
+
+func (i Istruct) MarshalText() ([]byte, error) {
+	return i.MarshalText()
+}
+
+type Impl1 struct {
+	Istruct
+	val string
+}
+
+func (impl Impl1) MarshalText() ([]byte, error) {
+	return []byte(impl.val), nil
+}
+
+func (impl *Impl1) UnmarshalText(text []byte) error {
+	impl.val = string(text)
+	return nil
+}
+
+func (impl Impl1) f() string {
+	return impl.val
+}
+
+type S struct {
+	Ivalue *Impl1
 }

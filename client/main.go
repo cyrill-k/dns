@@ -15,6 +15,8 @@ var records = map[string]string{
 	"test.service.": "192.168.0.2",
 }
 
+var pilaConfig dns.PilaConfig
+
 func parseQuery(m *dns.Msg) {
 	for _, q := range m.Question {
 		switch q.Qtype {
@@ -77,6 +79,9 @@ func main() {
 	//config.RemoteIP = *flag.Uint("localport", "127.0.0.1", "Server IP address")
 	keyFolder := flag.String("genfolder", "-", "folder where the ECDSA keys are saved")
 	flag.Parse()
+
+	pilaConfig = dns.DefaultConfig()
+
 	if *keyFolder == "-" {
 		*keyFolder = "/home/cyrill/test/"
 	}
@@ -102,7 +107,7 @@ func main() {
 	log.Println("test3")
 
 	// verify signature
-	err = dns.PilaVerify(in, m, verifier, config.LocalIP)
+	err = pilaConfig.PilaVerify(in, m, verifier, config.LocalIP)
 	if err != nil {
 		log.Fatalf("PILA verification failed: %s", err.Error())
 	}

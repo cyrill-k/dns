@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"math/big"
@@ -24,20 +25,25 @@ import (
 	"encoding/pem"
 
 	"github.com/scionproto/scion/go/lib/addr"
+	"github.com/scionproto/scion/go/lib/crypto/cert"
+	"github.com/scionproto/scion/go/lib/crypto/trc"
+	"github.com/scionproto/scion/go/lib/ctrl"
 	"github.com/scionproto/scion/go/lib/ctrl/cert_mgmt"
-	"github.com/scionproto/scion/go/lib/sciond"
 	"github.com/scionproto/scion/go/lib/snet"
 )
 
 type EndpointIdentifierType int
 
 const (
-	pilaTxtNameString                        = "txt.pila."
-	pilaSIGNameString                        = "sig.pila."
-	pilaKEYNameString                        = "sig.pila."
-	pilaIPv4          EndpointIdentifierType = 1
-	pilaIPv6          EndpointIdentifierType = 2
-	pilaScion         EndpointIdentifierType = 100 // temporary assignment
+	pilaTxtNameString                                  = "txt.pila."
+	pilaSIGNameString                                  = "sig.pila."
+	pilaKEYNameString                                  = "sig.pila."
+	pilaASCertificateSignedName                        = "PILA CERTIFICATE"
+	pilaIPv4                    EndpointIdentifierType = 1
+	pilaIPv6                    EndpointIdentifierType = 2
+	pilaScion                   EndpointIdentifierType = 100 // temporary assignment
+	MaxTries                                           = 3
+	MaxResponseSizeInBytes                             = 10000
 )
 
 type SignerWithAlgorithm interface {
@@ -51,17 +57,67 @@ type PublicKeyWithAlgorithm interface {
 }
 
 type PilaConfig struct {
-	lAddr, csAddr              *snet.Addr
-	lIA                        addr.IA
-	sciondPath, dispatcherPath string
+	lAddr, csAddr                       *snet.Addr
+	lIA                                 addr.IA
+	sciondPath, dispatcherPath, trcPath string
+	port                                uint16
+	certificateServerReadDeadline       time.Duration
 }
 
-func (signalg SignerWithAlgorithm) GetPublicKey() (PublicKeyWithAlgorithm, error) {
+func (c *PilaConfig) ReadTrc() (*trc.TRC, error) {
+	//todo(cyrill): compression should maybe be true?
+	trc, err := trc.TRCFromFile(c.trcPath, false)
+	if err != nil {
+		return nil, err
+	}
+	return trc, nil
+}
+
+type EndpointIdentifier interface {
+	MarshalText() ([]byte, error)
+}
+
+func DefaultConfig() PilaConfig {
+	csReadDeadline, err := time.ParseDuration("500ms")
+	if err != nil {
+		panic(err)
+	}
+	lAddr, err := snet.AddrFromString("17-1039,[127.0.0.1]:80")
+	if err != nil {
+		panic(err)
+	}
+	csAddr, err := snet.AddrFromString("17-1039,[127.0.0.1]:31043")
+	if err != nil {
+		panic(err)
+	}
+	lIA, err := addr.IAFromString("17-1039")
+	if err != nil {
+		panic(err)
+	}
+
+	return PilaConfig{
+		lAddr:          lAddr,
+		csAddr:         csAddr,
+		lIA:            lIA,
+		sciondPath:     "/home/cyrill/go/src/github.com/scionproto/scion/bin/sciond",
+		dispatcherPath: "/home/cyrill/go/src/github.com/scionproto/scion/bin/dispatcher",
+		//dispatcherPath: "/run/shm/dispatcher/default.sock",
+		trcPath: "/home/cyrill/go/src/github.com/scionproto/scion/gen/ISD17/AS1039/cs17-1039-1/certs/ISD17-V1.trc",
+		port:    50123,
+		certificateServerReadDeadline: csReadDeadline}
+}
+
+func GetPublicKeyWithAlgorithm(signalg SignerWithAlgorithm) (PublicKeyWithAlgorithm, error) {
+	log.Printf("get pub key: %T\n", signalg)
 	switch signalg.Signer().(type) {
-	case ECDSASigner:
-		return NewECDSAPublicKey(signalg.Signer().PublicKey.(*ecdsa.PublicKey), signalg.Algorithm()), nil
+	case *ecdsa.PrivateKey:
+		return NewECDSAPublicKey(signalg.Signer().Public().(*ecdsa.PublicKey)), nil
 	}
 	return nil, errors.New("Unsupported private key cannot be converted into public key")
+}
+
+func GetPublicKeyRaw(pubKey PublicKeyWithAlgorithm) ([]byte, error) {
+	return fromBase64([]byte(pubKey.PublicKeyBase64()))
 }
 
 type ECDSASigner struct {
@@ -184,10 +240,194 @@ func LoadRootOfTrustCertificate(path string) (PilaGeneralCertificate, error) {
 	return nil, nil
 }
 
-func PilaRequestASSignature(lAddr, csAddr *snet.Addr, publicKey PublicKeyWithAlgorithm) (PilaGeneralCertificate, error) {
-	snet.Init(addr.IAFromString("17-1039"), sciond.GetDefaultSCIONDPath(nil), "/run/shm/dispatcher/default.sock")
-	n := snet.DialSCION("udp4", lAddr, csAddr)
+type ASCertificateHandler struct {
+	conn   *snet.Conn
+	config *PilaConfig
+}
 
+func NewASCertificateHandler(config *PilaConfig) *ASCertificateHandler {
+	return &ASCertificateHandler{config: config}
+}
+
+func (h *ASCertificateHandler) InitIfNecessary() error {
+	if snet.DefNetwork == nil {
+		log.Printf("snet.Init: lIA = %s, sciond path = \"%s\", dispatcher path = \"%s\"",
+			h.config.lIA.String(), h.config.sciondPath, h.config.dispatcherPath)
+		return snet.Init(h.config.lIA, h.config.sciondPath, h.config.dispatcherPath)
+	}
+	return nil
+}
+
+func (h *ASCertificateHandler) createASCertificateRequest(publicKey PublicKeyWithAlgorithm) ([]byte, error) {
+	publicKeyRaw, _ := GetPublicKeyRaw(publicKey)
+	req := &cert_mgmt.PilaReq{
+		SignedName: pilaASCertificateSignedName,
+		EndpointIdentifier: cert_mgmt.HostInfo{
+			Port: h.config.port,
+			Addrs: struct {
+				Ipv4 []byte
+				Ipv6 []byte
+			}{Ipv4: h.config.lAddr.Host.IP()}},
+		RawPublicKey: publicKeyRaw}
+	cpld, err := ctrl.NewCertMgmtPld(req, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return cpld.PackPld()
+}
+
+// // Hack to use existing cert.Certificate & existing signing methods
+// type EndpointIdentifierSubject struct {
+// 	addr.IA
+// 	stringRepresentation []byte
+// }
+
+// func (ei EndpointIdentifierSubject) MarshalText() ([]byte, error) {
+// 	return stringRepresentation
+// }
+
+// func (ei EndpointIdentifierSubject) Eq(other EndpointIdentifierSubject) bool {
+// 	// check type
+
+// 	// check content
+// 	....................
+// }
+
+// type PilaCertificate struct {
+// 	cert.Certificate
+// 	endpointIdentifierSubject EndpointIdentifierSubject
+// 	signedNameComment string
+// }
+
+func (h *ASCertificateHandler) parseASCertificateReply(reply []byte) (*cert_mgmt.PilaRep, error) {
+	signed, err := ctrl.NewSignedPldFromRaw(reply)
+	if err != nil {
+		return nil, errors.New("Unable to parse signed payload: " + err.Error())
+	}
+
+	//todo(cyrill): perform verification?
+	// if signed.Sign != nil {
+	// 	verifier := config.GetVerifier()
+	// 	if err := ctrl.VerifySig(signed, verifier); err != nil {
+	// 		return common.NewBasicError("Unable to verify signed payload", err, "addr", addr)
+	// 	}
+	// }
+
+	cpld, err := signed.Pld()
+	if err != nil {
+		return nil, errors.New("Unable to parse ctrl payload: " + err.Error())
+	}
+
+	c, err := cpld.Union()
+	if err != nil {
+		return nil, errors.New("Unable to unpack ctrl union: " + err.Error())
+	}
+	switch c.(type) {
+	case *cert_mgmt.Pld:
+		pld, err := c.(*cert_mgmt.Pld).Union()
+		if err != nil {
+			return nil, errors.New("Unable to unpack cert_mgmt union: " + err.Error())
+		}
+		switch pld.(type) {
+		case *cert_mgmt.PilaRep:
+			return pld.(*cert_mgmt.PilaRep), nil
+		default:
+			return nil, fmt.Errorf("Wrong cert_mgmgt type (protoID=%s): %T", pld.ProtoId(), pld)
+		}
+	default:
+		return nil, fmt.Errorf("Handler for cpld not implemented: ProtoID=%s", c.ProtoId())
+	}
+}
+
+func (h *ASCertificateHandler) validateCertificate(reply *cert.PilaCertificate, publicKey PublicKeyWithAlgorithm) error {
+	publicKeyRaw, err := GetPublicKeyRaw(publicKey)
+	if err != nil {
+		return errors.New("Certificate cannot be validated: " + err.Error())
+	}
+	if !bytes.Equal(reply.SubjectSignKey, publicKeyRaw) {
+		return errors.New("Signing key is not identical")
+	}
+	//todo(cyrill): adjust for different certificate subject entities
+	configEntity := cert.PilaCertificateEntity{Ipv4: h.config.lAddr.Host.IP()}
+	if !configEntity.Eq(reply.Subject) {
+		return errors.New("Subject is not identical")
+	}
+	if pilaASCertificateSignedName == reply.Comment {
+		return errors.New("Comment field (signedName) is not identical")
+	}
+	//if reply.Verify(subject PilaCertificateEntity, verifyKey common.RawBytes, signAlgo string)
+	return nil
+}
+
+func (h *ASCertificateHandler) PilaRequestASCertificate(publicKey PublicKeyWithAlgorithm) (*cert.PilaChain, error) {
+	if err := h.InitIfNecessary(); err != nil {
+		return nil, err
+	}
+
+	log.Println("PilaRequestASCertificate: lAddr = " + h.config.lAddr.String() + ", csAddr = " + h.config.csAddr.String())
+	if h.conn == nil {
+		conn, err := snet.DialSCION("udp4", h.config.lAddr, h.config.csAddr)
+		if err != nil {
+			return nil, err
+		}
+		h.conn = conn
+	}
+
+	req, err := h.createASCertificateRequest(publicKey)
+	if err != nil {
+		return nil, err
+	}
+
+	readBuffer := make([]byte, MaxResponseSizeInBytes)
+	var numtries int64 = 0
+	for numtries < MaxTries {
+		_, err = h.conn.Write(req)
+		if err != nil {
+			return nil, err
+		}
+
+		err = h.conn.SetReadDeadline(time.Now().Add(h.config.certificateServerReadDeadline))
+		if err != nil {
+			return nil, err
+		}
+
+		_, err := h.conn.Read(readBuffer)
+		if err != nil {
+			// Do note return with error, retry up to MaxTries
+			log.Println("Error reading AS cert response from certificate server (numtries=%d): %s", numtries, err.Error())
+			numtries++
+			continue
+		}
+
+		// Remove read deadline
+		// todo(cyrill): necessary?
+		err = h.conn.SetReadDeadline(time.Time{})
+		if err != nil {
+			return nil, err
+		}
+
+		// Extract result
+		reply, err := h.parseASCertificateReply(readBuffer)
+		if err != nil {
+			return nil, err
+		}
+
+		pilaChain, err := reply.PilaChain()
+		if err != nil {
+			return nil, err
+		}
+
+		if err := h.validateCertificate(pilaChain.Endpoint, publicKey); err != nil {
+			return nil, errors.New("Failed to validate reply from certificate server: " + err.Error())
+		}
+		return pilaChain, nil
+	}
+
+	if numtries == MaxTries {
+		return nil, fmt.Errorf("Error, could not receive a certificate server response, MaxTries attempted without success.")
+	}
+
+	panic("Should not reach here")
 	return nil, nil
 }
 
@@ -208,19 +448,31 @@ func GenerateKeyTag() uint16 {
 	return 42
 }
 
-func (conf *PilaConfig) PilaSign(m *Msg, signalg SignerWithAlgorithm) error {
-	pub, err := signalg.GetPublicKey()
+func (conf *PilaConfig) PilaSign(m *Msg, signalg SignerWithAlgorithm, peerIP net.IP) error {
+	pub, err := GetPublicKeyWithAlgorithm(signalg)
 	if err != nil {
 		return errors.New("Failed to extract public key to send to the certificate server: " + err.Error())
 	}
-	cert, err := PilaRequestASSignature(snet.AddrFromString("127.0.0.1"), certServerAddress, pub)
+	h := NewASCertificateHandler(conf)
+	//todo(cyrill) add cert to pila txt record
+	chain, err := h.PilaRequestASCertificate(pub)
+	if err != nil {
+		return err
+	}
 	//todo(cyrill): adjust parameters
 	sigrr := createPilaSIG(signalg.Algorithm(), GenerateKeyTag(), pilaSIGNameString)
-	additionalInfo, err := sigrr.getAdditionalInfo(m.Request, Encode(conf.lAddr.Host.IP()))
+	additionalInfo, err := sigrr.getAdditionalInfo(m.Request, Encode(peerIP))
 	if err != nil {
 		return errors.New("Failed to extract additional info from request")
 	}
 	log.Println(additionalInfo)
+
+	jsonEncodedPilaChain, err := chain.JSON(false)
+	if err != nil {
+		return errors.New("Failed to create JSON encoding of PilaChain: " + err.Error())
+	}
+	addPilaTxtRecord(m, false, true, []byte(jsonEncodedPilaChain))
+
 	signedMsgPacked, err := sigrr.pilaSignRR(signalg.Signer(), m, additionalInfo)
 	if err != nil {
 		return errors.New("Failed PILA signature: " + err.Error())
@@ -252,6 +504,34 @@ func (conf *PilaConfig) PilaVerify(m *Msg, original *Msg, signalg PublicKeyWithA
 		return errors.New("Returned algrithm does not match expected algorithm")
 	}
 
+	// get PilaChain from txt record in m
+	pilaTxt, err := getPilaTxtRecord(m)
+	if err != nil {
+		return errors.New("Failed to retrieve certificate chain from message: " + err.Error())
+	}
+
+	// extract PilaChain
+	pilaChain, err := cert.PilaChainFromRaw(pilaTxt.CertificateChainRaw)
+	if err != nil {
+		return errors.New("Failed to parse PILA certificate chain: " + err.Error())
+	}
+
+	// verify pilachain using trc
+	trc, err := conf.ReadTrc()
+	if err := pilaChain.Verify(cert.PilaCertificateEntity{Ipv4: remoteIp}, trc); err != nil {
+		return errors.New("Failed to verify PILA certificate chain: " + err.Error())
+	}
+
+	// get public key from leaf cert and set algorithm & base64 pubkey
+	var algorithm uint8
+	switch pilaChain.Endpoint.SignAlgorithm {
+	case "ECDSAP256SHA256":
+		algorithm = ECDSAP256SHA256
+	case "ECDSAP384SHA384":
+		algorithm = ECDSAP384SHA384
+	}
+	pubKeyBase64 := toBase64(pilaChain.Endpoint.SubjectSignKey)
+
 	// Create verification context based on original message
 	var originalRaw []byte
 	original.PackBuffer(originalRaw)
@@ -261,7 +541,7 @@ func (conf *PilaConfig) PilaVerify(m *Msg, original *Msg, signalg PublicKeyWithA
 	}
 
 	// Create dns.KEY object to verify signature
-	key := createPilaKEY(3, signalg.Algorithm(), signalg.PublicKeyBase64())
+	key := createPilaKEY(3, algorithm, pubKeyBase64)
 
 	// Verify signature
 	buf, err := m.Pack()
@@ -370,8 +650,12 @@ func getPilaSIG(m *Msg) (*SIG, error) {
 }
 
 type PilaTxtStruct struct {
-	Randomness     []byte
-	CertificateRaw []byte
+	// Adds randomness to a request in order to prevent replay attacks
+	Randomness []byte
+	// A list of certificates used to authenticate this message from the root of
+	// trust (TRC in case of SCION) to the certificate authenticating the IP
+	// address of the server
+	CertificateChainRaw []byte
 }
 
 type SourceIdentifier interface {
@@ -391,8 +675,12 @@ func Encode(ip net.IP) []byte {
 	return encoded
 }
 
-func addPilaTxtRecord(m *Msg, requestingSignature bool, providingSignature bool, certificateRaw []byte) error {
-	txtContent, error := createPilaTxtRecord(requestingSignature, providingSignature, certificateRaw)
+func addPilaTxtRecord(m *Msg, requestingSignature bool, providingSignature bool, certificateChainRaw []byte) error {
+	var randomnessLength int
+	if requestingSignature {
+		randomnessLength = 8
+	}
+	txtContent, error := createPilaTxtRecord(randomnessLength, certificateChainRaw)
 	if error != nil {
 		return error
 	}
@@ -437,9 +725,10 @@ func getPilaTxtRecord(m *Msg) (*PilaTxtStruct, error) {
 	return &s, nil
 }
 
-func createPilaTxtRecord(requestingSignature bool, providingSignature bool, certificateRaw []byte) ([]byte, error) {
+func createPilaTxtRecord(randomnessLength int, certificatesRaw []byte) ([]byte, error) {
+	randValue := randofsize(randomnessLength)
 	//todo(cyrill): randomness length
-	txtStruct := PilaTxtStruct{Randomness: randofsize(8), CertificateRaw: certificateRaw}
+	txtStruct := PilaTxtStruct{Randomness: randValue, CertificateChainRaw: certificatesRaw}
 	txtEncoded, error := asn1.Marshal(txtStruct)
 	if error != nil {
 		return nil, errors.New("Cannot marshal PilaTxtStruct")
