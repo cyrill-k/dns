@@ -93,10 +93,11 @@ func main() {
 
 	m := new(dns.Msg)
 	m.SetQuestion("test.service.", dns.TypeA)
-	dns.PilaRequestSignature(m)
+	pilaConfig.PilaRequestSignature(m)
 
 	// start client
 	c := new(dns.Client)
+	c.UDPSize = pilaConfig.MaxUdpSize
 
 	// perform exchange
 	in, _, err := c.Exchange(m, config.RemoteIP.String()+":"+strconv.FormatUint(uint64(config.RemotePort), 10))

@@ -29,6 +29,7 @@ import (
 	"github.com/scionproto/scion/go/lib/crypto/trc"
 	"github.com/scionproto/scion/go/lib/ctrl"
 	"github.com/scionproto/scion/go/lib/ctrl/cert_mgmt"
+	"github.com/scionproto/scion/go/lib/sciond"
 	"github.com/scionproto/scion/go/lib/snet"
 )
 
@@ -62,6 +63,7 @@ type PilaConfig struct {
 	sciondPath, dispatcherPath, trcPath string
 	port                                uint16
 	certificateServerReadDeadline       time.Duration
+	MaxUdpSize                          uint16
 }
 
 func (c *PilaConfig) ReadTrc() (*trc.TRC, error) {
@@ -99,12 +101,12 @@ func DefaultConfig() PilaConfig {
 		lAddr:          lAddr,
 		csAddr:         csAddr,
 		lIA:            lIA,
-		sciondPath:     "/home/cyrill/go/src/github.com/scionproto/scion/bin/sciond",
-		dispatcherPath: "/home/cyrill/go/src/github.com/scionproto/scion/bin/dispatcher",
-		//dispatcherPath: "/run/shm/dispatcher/default.sock",
-		trcPath: "/home/cyrill/go/src/github.com/scionproto/scion/gen/ISD17/AS1039/cs17-1039-1/certs/ISD17-V1.trc",
-		port:    50123,
-		certificateServerReadDeadline: csReadDeadline}
+		sciondPath:     sciond.GetDefaultSCIONDPath(nil),
+		dispatcherPath: "/run/shm/dispatcher/default.sock",
+		trcPath:        "/home/cyrill/go/src/github.com/scionproto/scion/gen/ISD17/AS1039/cs17-1039-1/certs/ISD17-V1.trc",
+		port:           50123,
+		certificateServerReadDeadline: csReadDeadline,
+		MaxUdpSize:                    4096}
 }
 
 func GetPublicKeyWithAlgorithm(signalg SignerWithAlgorithm) (PublicKeyWithAlgorithm, error) {
@@ -259,6 +261,7 @@ func (h *ASCertificateHandler) InitIfNecessary() error {
 }
 
 func (h *ASCertificateHandler) createASCertificateRequest(publicKey PublicKeyWithAlgorithm) ([]byte, error) {
+	log.Println("createASCertificateRequest")
 	publicKeyRaw, _ := GetPublicKeyRaw(publicKey)
 	req := &cert_mgmt.PilaReq{
 		SignedName: pilaASCertificateSignedName,
@@ -339,23 +342,25 @@ func (h *ASCertificateHandler) parseASCertificateReply(reply []byte) (*cert_mgmt
 	}
 }
 
-func (h *ASCertificateHandler) validateCertificate(reply *cert.PilaCertificate, publicKey PublicKeyWithAlgorithm) error {
+func (h *ASCertificateHandler) validateCertificate(endpointCert *cert.PilaCertificate, publicKey PublicKeyWithAlgorithm) error {
 	publicKeyRaw, err := GetPublicKeyRaw(publicKey)
 	if err != nil {
 		return errors.New("Certificate cannot be validated: " + err.Error())
 	}
-	if !bytes.Equal(reply.SubjectSignKey, publicKeyRaw) {
+	if !bytes.Equal(endpointCert.SubjectSignKey, publicKeyRaw) {
 		return errors.New("Signing key is not identical")
 	}
 	//todo(cyrill): adjust for different certificate subject entities
 	configEntity := cert.PilaCertificateEntity{Ipv4: h.config.lAddr.Host.IP()}
-	if !configEntity.Eq(reply.Subject) {
-		return errors.New("Subject is not identical")
+	if !configEntity.Eq(endpointCert.Subject) {
+		localIP, _ := configEntity.MarshalText()
+		remoteIP, _ := endpointCert.Subject.MarshalText()
+		return errors.New("Local IP Address (" + string(localIP) + ") != endpointCert.Subject (" + string(remoteIP) + ")")
 	}
-	if pilaASCertificateSignedName == reply.Comment {
-		return errors.New("Comment field (signedName) is not identical")
+	if pilaASCertificateSignedName != endpointCert.Comment {
+		return errors.New("SignedName (" + pilaASCertificateSignedName + ") != Endpoint cert.Comment(" + endpointCert.Comment + ")")
 	}
-	//if reply.Verify(subject PilaCertificateEntity, verifyKey common.RawBytes, signAlgo string)
+	//if endpointCert.Verify(subject PilaCertificateEntity, verifyKey common.RawBytes, signAlgo string)
 	return nil
 }
 
@@ -368,14 +373,14 @@ func (h *ASCertificateHandler) PilaRequestASCertificate(publicKey PublicKeyWithA
 	if h.conn == nil {
 		conn, err := snet.DialSCION("udp4", h.config.lAddr, h.config.csAddr)
 		if err != nil {
-			return nil, err
+			return nil, errors.New("Failed snet.DialSCION: " + err.Error())
 		}
 		h.conn = conn
 	}
 
 	req, err := h.createASCertificateRequest(publicKey)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("Failed to create PILA AS certificate request: " + err.Error())
 	}
 
 	readBuffer := make([]byte, MaxResponseSizeInBytes)
@@ -383,21 +388,23 @@ func (h *ASCertificateHandler) PilaRequestASCertificate(publicKey PublicKeyWithA
 	for numtries < MaxTries {
 		_, err = h.conn.Write(req)
 		if err != nil {
-			return nil, err
+			return nil, errors.New("Failed to write req(size = " + strconv.Itoa(MaxResponseSizeInBytes) + "): " + err.Error())
 		}
 
 		err = h.conn.SetReadDeadline(time.Now().Add(h.config.certificateServerReadDeadline))
 		if err != nil {
-			return nil, err
+			return nil, errors.New("Failed to read PILA AS certificate response: " + err.Error())
 		}
 
-		_, err := h.conn.Read(readBuffer)
+		n, err := h.conn.Read(readBuffer)
 		if err != nil {
 			// Do note return with error, retry up to MaxTries
 			log.Println("Error reading AS cert response from certificate server (numtries=%d): %s", numtries, err.Error())
 			numtries++
 			continue
 		}
+		log.Println("Read PILA AS cert reply (" + strconv.Itoa(n) + "bytes)")
+		repBuf := readBuffer[:n]
 
 		// Remove read deadline
 		// todo(cyrill): necessary?
@@ -407,15 +414,24 @@ func (h *ASCertificateHandler) PilaRequestASCertificate(publicKey PublicKeyWithA
 		}
 
 		// Extract result
-		reply, err := h.parseASCertificateReply(readBuffer)
+		reply, err := h.parseASCertificateReply(repBuf)
 		if err != nil {
 			return nil, err
 		}
+
+		//		log.Println("AS cert reply (size=" + strconv.Itoa(len(reply)) + ")")
 
 		pilaChain, err := reply.PilaChain()
 		if err != nil {
 			return nil, err
 		}
+
+		jsonIssuer, err := pilaChain.Issuer.JSON(true)
+		jsonLeaf, err := pilaChain.Leaf.JSON(true)
+		jsonEndpoint, err := pilaChain.Endpoint.JSON(true)
+		log.Println("issuer = " + string(jsonIssuer))
+		log.Println("leaf = " + string(jsonLeaf))
+		log.Println("endpoint = " + string(jsonEndpoint))
 
 		if err := h.validateCertificate(pilaChain.Endpoint, publicKey); err != nil {
 			return nil, errors.New("Failed to validate reply from certificate server: " + err.Error())
@@ -435,8 +451,10 @@ func PilaRequestRootOfTrustCertificate() (PilaGeneralCertificate, error) {
 	return nil, nil
 }
 
-func PilaRequestSignature(m *Msg) error {
+func (c *PilaConfig) PilaRequestSignature(m *Msg) error {
 	addPilaTxtRecord(m, false, true, []byte{})
+	//todo(cyrill): set/unset DO bit in client
+	addPilaOptRecord(m, c.MaxUdpSize, false)
 	return nil
 }
 
@@ -675,6 +693,57 @@ func Encode(ip net.IP) []byte {
 	return encoded
 }
 
+func combineTxtResources(txtStrings []string) string {
+	var b strings.Builder
+	for _, s := range txtStrings {
+		b.Write([]byte(s))
+	}
+	return b.String()
+}
+
+func minInt(x, y int) int {
+	if x < y {
+		return x
+	}
+	return y
+}
+
+// splits content into an array of strings of size <= 255.
+// Stops splitting as soon as the maximum allowed content
+// size is reached (2^16-2^8) and returns an offset of the
+// next byte in content that was not yet added to the array.
+func splitTxtResources(content string) (txtStrings []string, off int) {
+	// max allowed size for txt resource record RDATA is 2^16
+	// Since one byte per txtstring is used to indicate the size
+	// of the txtstring, the maximum allowed content size is
+	// 2^8*(2^8-1) = 2^16 - 2^8
+	for off < len(content) {
+		newOff := minInt(off+255, len(content))
+		txtStrings = append(txtStrings, content[off:newOff])
+		off = newOff
+		if off >= (1<<16)-(1<<8) {
+			break
+		}
+	}
+	return
+}
+
+func addPilaOptRecord(m *Msg, maxUdpSize uint16, do bool) {
+	// create opt record (EDNS0)
+	m.SetEdns0(maxUdpSize, do)
+
+	// opt := new(OPT)
+	// opt.Header().Name = "."
+	// opt.Header().Rrtype = TypeOPT
+	// //opt.Header().Class = 4096
+	// //opt.Header().Ttl = 0
+	// //opt.Header().Rdlength = 0
+	// opt.SetUDPSize(maxUdpSize)
+
+	// // add record to m
+	// m.Extra = append(m.Extra, opt)
+}
+
 func addPilaTxtRecord(m *Msg, requestingSignature bool, providingSignature bool, certificateChainRaw []byte) error {
 	var randomnessLength int
 	if requestingSignature {
@@ -685,7 +754,12 @@ func addPilaTxtRecord(m *Msg, requestingSignature bool, providingSignature bool,
 		return error
 	}
 	var rr RR
-	rr = &TXT{Hdr: RR_Header{Name: pilaTxtNameString, Rrtype: TypeTXT, Class: ClassINET, Ttl: 0}, Txt: []string{string(txtContent)}}
+	//todo(cyrill): split content into different txt string records
+	txtStringRecords, off := splitTxtResources(string(txtContent))
+	if len(txtContent) != off {
+		return fmt.Errorf("Couldn't fit certificate chain into txt record. Added %d of %d bytes", off, len(txtContent))
+	}
+	rr = &TXT{Hdr: RR_Header{Name: pilaTxtNameString, Rrtype: TypeTXT, Class: ClassINET, Ttl: 0}, Txt: txtStringRecords}
 	m.Extra = append(m.Extra, rr)
 	return nil
 }
@@ -718,8 +792,9 @@ func getPilaTxtRecord(m *Msg) (*PilaTxtStruct, error) {
 	if len(rr.Txt) == 0 {
 		return nil, errors.New("Empty txt record")
 	}
+	txtStringsCombined := combineTxtResources(rr.Txt)
 	var s PilaTxtStruct
-	if _, err := asn1.Unmarshal([]byte(rr.Txt[0]), &s); err != nil {
+	if _, err := asn1.Unmarshal([]byte(txtStringsCombined), &s); err != nil {
 		return nil, errors.New("ASN1 Unmarshal failed: " + err.Error())
 	}
 	return &s, nil
@@ -866,21 +941,26 @@ func (rr *SIG) pilaSignRR(k crypto.Signer, m *Msg, additionalInfo []byte) ([]byt
 	// }
 	// log.Println("SIG packing/unpacking: DeepEqual() = " + strconv.FormatBool(reflect.DeepEqual(rr, testUnpacked)))
 
+	log.Printf("m.Len() = %d, rr.len() = %d", m.Len(), rr.len())
 	buf := make([]byte, m.Len()+rr.len())
 	mbuf, err := m.PackBuffer(buf)
+	log.Println("test1")
 	if err != nil {
 		return nil, err
 	}
+	log.Println("test2")
 	if &buf[0] != &mbuf[0] {
 		return nil, ErrBuf
 	}
 	off, err := PackRR(rr, buf, len(mbuf), nil, false)
+	log.Println("test3")
 	if err != nil {
 		return nil, err
 	}
 	buf = buf[:off:cap(buf)]
 
 	hash, ok := AlgorithmToHash[rr.Algorithm]
+	log.Println("test4")
 	if !ok {
 		return nil, ErrAlg
 	}
