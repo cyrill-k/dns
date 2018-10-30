@@ -6,6 +6,7 @@ import (
 	"crypto/dsa"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/binary"
@@ -16,6 +17,7 @@ import (
 	"log"
 	"math/big"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -35,16 +37,20 @@ import (
 
 type EndpointIdentifierType int
 
+type PostSignFunction func([]byte) []byte
+
 const (
-	pilaTxtNameString                                  = "txt.pila."
-	pilaSIGNameString                                  = "sig.pila."
-	pilaKEYNameString                                  = "sig.pila."
-	pilaASCertificateSignedName                        = "PILA CERTIFICATE"
-	pilaIPv4                    EndpointIdentifierType = 1
-	pilaIPv6                    EndpointIdentifierType = 2
-	pilaScion                   EndpointIdentifierType = 100 // temporary assignment
-	MaxTries                                           = 3
-	MaxResponseSizeInBytes                             = 10000
+	pilaTxtNameString                                    = "txt.pila."
+	pilaSIGNameString                                    = "sig.pila."
+	pilaKEYNameString                                    = "sig.pila."
+	pilaASCertificateSignedName                          = "PILA CERTIFICATE"
+	pilaIPv4                      EndpointIdentifierType = 1
+	pilaIPv6                      EndpointIdentifierType = 2
+	pilaScion                     EndpointIdentifierType = 100 // temporary assignment
+	MaxTries                                             = 3
+	MaxResponseSizeInBytes                               = 10000
+	EXIT_CODE_EXCHANGE_FAILED                            = 2
+	EXIT_CODE_VERIFICATION_FAILED                        = 3
 )
 
 type SignerWithAlgorithm interface {
@@ -64,6 +70,11 @@ type PilaConfig struct {
 	port                                uint16
 	certificateServerReadDeadline       time.Duration
 	MaxUdpSize                          uint16
+	environmentInitialized              bool
+}
+
+func PostSignNoOp(in []byte) []byte {
+	return in
 }
 
 func (c *PilaConfig) ReadTrc() (*trc.TRC, error) {
@@ -75,6 +86,12 @@ func (c *PilaConfig) ReadTrc() (*trc.TRC, error) {
 	return trc, nil
 }
 
+func (c *PilaConfig) InitializeEnvironment() {
+	if c.environmentInitialized {
+		os.Setenv("TZ", "UTC")
+	}
+}
+
 type EndpointIdentifier interface {
 	MarshalText() ([]byte, error)
 }
@@ -84,7 +101,7 @@ func DefaultConfig() PilaConfig {
 	if err != nil {
 		panic(err)
 	}
-	lAddr, err := snet.AddrFromString("17-1039,[127.0.0.1]:80")
+	lAddr, err := snet.AddrFromString("17-1039,[127.0.0.1]:0")
 	if err != nil {
 		panic(err)
 	}
@@ -194,6 +211,16 @@ func NewECDSAPublicKey(publicKey *ecdsa.PublicKey) PublicKeyWithAlgorithm {
 		AlgorithmValue: algorithm,
 	}
 	return &signer
+}
+
+func GenerateRandomness(size int) ([]byte, error) {
+	//todo(cyrill): Entropy of the seed?
+	result := make([]byte, size)
+	_, err := rand.Read(result)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 type PilaGeneralCertificate interface {
@@ -399,7 +426,7 @@ func (h *ASCertificateHandler) PilaRequestASCertificate(publicKey PublicKeyWithA
 		n, err := h.conn.Read(readBuffer)
 		if err != nil {
 			// Do note return with error, retry up to MaxTries
-			log.Println("Error reading AS cert response from certificate server (numtries=%d): %s", numtries, err.Error())
+			log.Printf("Error reading AS cert response from certificate server (numtries=%d): %s\n", numtries, err.Error())
 			numtries++
 			continue
 		}
@@ -466,7 +493,7 @@ func GenerateKeyTag() uint16 {
 	return 42
 }
 
-func (conf *PilaConfig) PilaSign(m *Msg, signalg SignerWithAlgorithm, peerIP net.IP) error {
+func (conf *PilaConfig) PilaSign(m *Msg, signalg SignerWithAlgorithm, peerIP net.IP, postSign PostSignFunction) error {
 	pub, err := GetPublicKeyWithAlgorithm(signalg)
 	if err != nil {
 		return errors.New("Failed to extract public key to send to the certificate server: " + err.Error())
@@ -491,7 +518,20 @@ func (conf *PilaConfig) PilaSign(m *Msg, signalg SignerWithAlgorithm, peerIP net
 	}
 	addPilaTxtRecord(m, false, true, []byte(jsonEncodedPilaChain))
 
-	signedMsgPacked, err := sigrr.pilaSignRR(signalg.Signer(), m, additionalInfo)
+	testTxt, err := getPilaTxtRecord(m)
+	if err != nil {
+		log.Printf("[Server] couldn't extract pila txt record: %s\n", err.Error())
+	} else {
+		log.Printf("[Server] **************SUCCESSFULLY DECODED FROM PILA TXT RECORD (%d)***************", len(testTxt.CertificateChainRaw))
+	}
+
+	// postSign := PostSignNoOp
+	// log.Printf("variadic param len = %d\n", len(postSignIn))
+	// if len(postSignIn) == 1 {
+	// 	log.Println("use custom post sign function")
+	// 	postSign = postSignIn[0]
+	// }
+	signedMsgPacked, err := sigrr.pilaSignRR(signalg.Signer(), m, additionalInfo, postSign)
 	if err != nil {
 		return errors.New("Failed PILA signature: " + err.Error())
 	}
@@ -511,7 +551,7 @@ func (conf *PilaConfig) PilaSign(m *Msg, signalg SignerWithAlgorithm, peerIP net
 
 func (conf *PilaConfig) PilaVerify(m *Msg, original *Msg, signalg PublicKeyWithAlgorithm, remoteIp net.IP) error {
 	// SIG and RRSIG implement interface RR
-	sigrr, err := getPilaSIG(m)
+	sigrr, err := GetPilaSIG(m)
 	if err != nil {
 		return errors.New("Error reading last SIG record from dns message: " + err.Error())
 	}
@@ -525,7 +565,7 @@ func (conf *PilaConfig) PilaVerify(m *Msg, original *Msg, signalg PublicKeyWithA
 	// get PilaChain from txt record in m
 	pilaTxt, err := getPilaTxtRecord(m)
 	if err != nil {
-		return errors.New("Failed to retrieve certificate chain from message: " + err.Error())
+		return errors.New("Failed to decode PILA TXT record: " + err.Error())
 	}
 
 	// extract PilaChain
@@ -536,6 +576,7 @@ func (conf *PilaConfig) PilaVerify(m *Msg, original *Msg, signalg PublicKeyWithA
 
 	// verify pilachain using trc
 	trc, err := conf.ReadTrc()
+	log.Println(time.Now().String())
 	if err := pilaChain.Verify(cert.PilaCertificateEntity{Ipv4: remoteIp}, trc); err != nil {
 		return errors.New("Failed to verify PILA certificate chain: " + err.Error())
 	}
@@ -652,7 +693,7 @@ func createPilaKEY(protocol uint8, algorithm uint8, publicKeyBase64 string) *KEY
 	return key
 }
 
-func getPilaSIG(m *Msg) (*SIG, error) {
+func GetPilaSIG(m *Msg) (*SIG, error) {
 	rr := getLastExtraRecord(m, TypeSIG)
 	if rr == nil {
 		return nil, errors.New("No Extra TypeSIG record available")
@@ -694,10 +735,17 @@ func Encode(ip net.IP) []byte {
 }
 
 func combineTxtResources(txtStrings []string) string {
+	var bLog strings.Builder
 	var b strings.Builder
-	for _, s := range txtStrings {
+	for i, s := range txtStrings {
 		b.Write([]byte(s))
+		if i != 0 {
+			bLog.Write([]byte(", "))
+		}
+		bLog.Write([]byte(fmt.Sprintf("(%d)", len(s))))
 	}
+	bLog.Write([]byte(fmt.Sprintf(" tot = %d", len(b.String()))))
+	log.Println(bLog.String())
 	return b.String()
 }
 
@@ -773,7 +821,18 @@ func getLastExtraRecord(m *Msg, typeCovered uint16) RR {
 	return nil
 }
 
-func getPilaTxtRecord(m *Msg) (*PilaTxtStruct, error) {
+// Decodes an escaped string: \" & \DDD into the corresponding byte string.
+// Returns an error if the size of the decoded string is larger than 255 bytes.
+func decodeTxtRecordString(in string) (string, error) {
+	buf := make([]byte, 256)
+	_, err := packString(in, buf[:], 0)
+	if err != nil {
+		return "", errors.New("Error decoding TXT string entries: " + err.Error())
+	}
+	return string(buf[1:]), nil
+}
+
+func getPilaTxtRecord(m *Msg, doNotDecodeTxtStrings ...bool) (*PilaTxtStruct, error) {
 	// No additional records
 	if len(m.Extra) == 0 {
 		return nil, errors.New("No additional resource records present")
@@ -782,6 +841,12 @@ func getPilaTxtRecord(m *Msg) (*PilaTxtStruct, error) {
 	rr := getLastExtraRecord(m, TypeTXT).(*TXT)
 	if rr == nil {
 		return nil, errors.New("No txt records present")
+	}
+	log.Printf("last extra record: %s", rr.String())
+
+	var shouldNotDecodeTxtStrings bool
+	if len(doNotDecodeTxtStrings) == 1 {
+		shouldNotDecodeTxtStrings = doNotDecodeTxtStrings[0]
 	}
 
 	// not pila txt record
@@ -792,7 +857,26 @@ func getPilaTxtRecord(m *Msg) (*PilaTxtStruct, error) {
 	if len(rr.Txt) == 0 {
 		return nil, errors.New("Empty txt record")
 	}
-	txtStringsCombined := combineTxtResources(rr.Txt)
+	log.Printf("len(rr.Txt) = %d", len(rr.Txt))
+
+	var decodedStrings []string
+	if !shouldNotDecodeTxtStrings {
+		decodedStrings = make([]string, len(rr.Txt))
+		for i, s := range rr.Txt {
+			var err error
+			decodedStrings[i], err = decodeTxtRecordString(s)
+			if err != nil {
+				return nil, errors.New("Error decoding TXT string entries: " + err.Error())
+			}
+		}
+	} else {
+		decodedStrings = rr.Txt
+	}
+	log.Println("Decoded strings:")
+	for i, s := range decodedStrings {
+		log.Printf("[%d] %s\n", i, s)
+	}
+	txtStringsCombined := combineTxtResources(decodedStrings)
 	var s PilaTxtStruct
 	if _, err := asn1.Unmarshal([]byte(txtStringsCombined), &s); err != nil {
 		return nil, errors.New("ASN1 Unmarshal failed: " + err.Error())
@@ -801,25 +885,16 @@ func getPilaTxtRecord(m *Msg) (*PilaTxtStruct, error) {
 }
 
 func createPilaTxtRecord(randomnessLength int, certificatesRaw []byte) ([]byte, error) {
-	randValue := randofsize(randomnessLength)
-	//todo(cyrill): randomness length
+	randValue, err := GenerateRandomness(randomnessLength)
+	if err != nil {
+		return nil, errors.New("Error generating randomness for PILA TXT record: " + err.Error())
+	}
 	txtStruct := PilaTxtStruct{Randomness: randValue, CertificateChainRaw: certificatesRaw}
 	txtEncoded, error := asn1.Marshal(txtStruct)
 	if error != nil {
 		return nil, errors.New("Cannot marshal PilaTxtStruct")
 	}
 	return txtEncoded, nil
-}
-
-func randofsize(size int) []byte {
-	//todo(cyrill): implement random function
-	var result []byte
-	start := byte('a')
-	for i := 0; i < size; i++ {
-		result = append(result, start)
-		start++
-	}
-	return result
 }
 
 func (rr *SIG) getAdditionalInfo(request []byte, srcIdentifier []byte) ([]byte, error) {
@@ -908,7 +983,7 @@ func LogSIG(data []byte, lengthHeaderName int, lengthSignerName int, totalLength
 // Sign signs a Msg. It fills the signature with the appropriate data.
 // The SIG record should have the SignerName, KeyTag, Algorithm, Inception
 // and Expiration set.
-func (rr *SIG) pilaSignRR(k crypto.Signer, m *Msg, additionalInfo []byte) ([]byte, error) {
+func (rr *SIG) pilaSignRR(k crypto.Signer, m *Msg, additionalInfo []byte, postSign PostSignFunction) ([]byte, error) {
 	if k == nil {
 		return nil, ErrPrivKey
 	}
@@ -982,7 +1057,10 @@ func (rr *SIG) pilaSignRR(k crypto.Signer, m *Msg, additionalInfo []byte) ([]byt
 		return nil, err
 	}
 
-	//log.Println("Before sign: " + LogSIG(buf[len(mbuf):], 15, 15, len(buf)-len(mbuf)))
+	log.Println("Before: " + toBase64(signature))
+	//todo(cyrill): Maybe put somewhere else (testing purposes only)
+	signature = postSign(signature)
+	log.Println("After: " + toBase64(signature))
 
 	rr.Signature = toBase64(signature)
 

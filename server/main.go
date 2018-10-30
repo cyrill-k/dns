@@ -16,13 +16,22 @@ import (
 	"github.com/cyrill-k/dns"
 )
 
-var records = map[string]string{
-	"test.service.": "1.2.3.4",
-}
+var (
+	records = map[string]string{
+		"test.service.": "1.2.3.4",
+	}
 
-var signer dns.SignerWithAlgorithm
+	generateKeys  = flag.Bool("gen", false, "generate new public/private ECDSA keys")
+	keyFolder     = flag.String("genfolder", "-", "folder where the ECDSA keys are saved")
+	debugFlag     = flag.Bool("debug", false, "Enable debug mode")
+	testingFlag   = flag.Bool("test", false, "Enable testing mode")
+	randomsigFlag = flag.Bool("randomsig", false, "Replace signature in the PILA SIG record with random data")
+	nosigFlag     = flag.Bool("nosig", false, "Do not attach a PILA SIG record")
 
-var config dns.PilaConfig
+	signer dns.SignerWithAlgorithm
+
+	config dns.PilaConfig
+)
 
 func parseQuery(m *dns.Msg) {
 	for _, q := range m.Question {
@@ -50,27 +59,42 @@ func handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
 		parseQuery(m)
 	}
 
-	host, _, error := net.SplitHostPort(w.RemoteAddr().String())
-	if error != nil {
-		log.Printf("Error retrieving IP address: ", error.Error())
+	host, _, err := net.SplitHostPort(w.RemoteAddr().String())
+	if err != nil {
+		log.Printf("[Server] Error retrieving IP address: %s", err.Error())
+		return
 	}
 
-	error = config.PilaSign(m, signer, net.ParseIP(host))
-	if error != nil {
-		log.Printf("Error signing response: ", error.Error())
+	if !*nosigFlag {
+		if *randomsigFlag {
+			log.Println("randomsig")
+			// Replace signature with a random value of the same length
+			err = config.PilaSign(m, signer, net.ParseIP(host),
+				func(in []byte) []byte {
+					r, _ := dns.GenerateRandomness(len(in))
+					return r
+				})
+		} else {
+			log.Println("noop postsign function")
+			err = config.PilaSign(m, signer, net.ParseIP(host), dns.PostSignNoOp)
+		}
+		if err != nil {
+			log.Printf("[Server] Error signing response: " + err.Error())
+			return
+		}
 	}
 
+	out, _ := m.Pack()
+	log.Printf("Sending reply of size %d (buflen = %d): %s\n", m.Len(), len(out), m)
 	w.WriteMsg(m)
 }
 
 func main() {
-	generateKeys := flag.Bool("gen", false, "generate new public/private ECDSA keys")
-	keyFolder := flag.String("genfolder", "-", "folder where the ECDSA keys are saved")
-	debugFlag := flag.Bool("debug", false, "Enable debug mode")
-	testingFlag := flag.Bool("test", false, "Enable testing mode")
 	flag.Parse()
+	log.Printf("randomsig = %v\n", *randomsigFlag)
 
 	config = dns.DefaultConfig()
+	config.InitializeEnvironment()
 
 	if *keyFolder == "-" {
 		*keyFolder = "/home/cyrill/test/"
@@ -104,7 +128,7 @@ func main() {
 		req := new(dns.Msg)
 		req.SetQuestion("test.service.", dns.TypeA)
 		dns.DebugPrint("req1", req)
-		dns.PilaRequestSignature(req)
+		config.PilaRequestSignature(req)
 		dns.DebugPrint("req2", req)
 
 		response := req.Copy()
@@ -114,13 +138,13 @@ func main() {
 		dns.DebugPrint("response1", response)
 
 		host := "127.0.0.1"
-		if error := config.PilaSign(response, signer, net.ParseIP(host)); error != nil {
-			log.Println("Error in PilaSign: " + error.Error())
+		if err := config.PilaSign(response, signer, net.ParseIP(host), dns.PostSignNoOp); err != nil {
+			log.Println("Error in PilaSign: " + err.Error())
 		}
 		dns.DebugPrint("response2", response)
 
-		if error := config.PilaVerify(response, req, verifier, net.ParseIP(host)); error != nil {
-			log.Println("Error in PilaVerify: " + error.Error())
+		if err := config.PilaVerify(response, req, verifier, net.ParseIP(host)); err != nil {
+			log.Println("Error in PilaVerify: " + err.Error())
 		}
 		dns.DebugPrint("response3", response)
 
@@ -143,6 +167,11 @@ func main() {
 		}
 		log.Println("val = " + sNew.Ivalue.f())
 
+		return
+	}
+
+	if *randomsigFlag && *nosigFlag {
+		log.Println("Either randomsig OR nosig can be specified; Not both")
 		return
 	}
 

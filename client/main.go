@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 
@@ -81,6 +82,7 @@ func main() {
 	flag.Parse()
 
 	pilaConfig = dns.DefaultConfig()
+	pilaConfig.InitializeEnvironment()
 
 	if *keyFolder == "-" {
 		*keyFolder = "/home/cyrill/test/"
@@ -102,16 +104,22 @@ func main() {
 	// perform exchange
 	in, _, err := c.Exchange(m, config.RemoteIP.String()+":"+strconv.FormatUint(uint64(config.RemotePort), 10))
 	if err != nil {
-		log.Fatalf("Failed to exchange message: %s\n ", err.Error())
+		log.Printf("Failed to exchange message: %s\n ", err.Error())
+		os.Exit(dns.EXIT_CODE_EXCHANGE_FAILED)
 	}
 
-	log.Println("test3")
+	// inPacked, err := in.Pack()
+	// if err != nil {
+	// 	log.Fatalf("Failed to pack response: %s", err)
+	// }
+	// log.Printf("Received response of length %d (buflen = %d): %s\n", in.Len(), len(inPacked), in.String())
 
 	// verify signature
 	err = pilaConfig.PilaVerify(in, m, verifier, config.LocalIP)
 	if err != nil {
-		log.Fatalf("PILA verification failed: %s", err.Error())
+		log.Printf("PILA verification failed: %s", err.Error())
+		os.Exit(dns.EXIT_CODE_VERIFICATION_FAILED)
 	}
 
-	log.Printf("Response: %s\n", in.String())
+	log.Printf("Verified Response: %s\n", in.Answer[0].String())
 }
