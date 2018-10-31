@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -24,21 +25,9 @@ var (
 	pilaClient   = flag.String("client", "/home/cyrill/go/src/github.com/cyrill-k/dns/client", "PILA GO server folder")
 )
 
-var killHooks []killHook
-
-func TestMain(m *testing.M) {
-	flag.Parse()
-	os.Exit(m.Run())
-	log.Printf("Executing %d killHooks\n", len(killHooks))
-	for _, h := range killHooks {
-		h()
-	}
-}
-
 func TestPilaSign(t *testing.T) {
 	// Test successful signing
-	ret, err, f := testClientVerification(t, "", true)
-	killHooks = append(killHooks, f)
+	ret, err := testClientVerification(t, "", true)
 	if err != nil {
 		t.Fatalf("Successful signing test failed with: %s", err.Error())
 	} else {
@@ -50,31 +39,43 @@ func TestPilaSign(t *testing.T) {
 
 func TestPilaVerify(t *testing.T) {
 	// Test successful verification
-	ret, err, f := testClientVerification(t, "-randomsig", true)
-	killHooks = append(killHooks, f)
+	ret, err := testClientVerification(t, "-randomsig", true)
 	if err == nil {
 		t.Fatalf("Fake signature was accepted by client")
 	} else {
-		log.Printf("ret = %d: err = %s\n", ret, err.Error())
-		//todo(cyrill): fix collection of error codes
-		// if ret != TEST_EXIT_CODE_VERIFICATION_FAILED {
-		// 	t.Fatalf("Other error than fake signature detected")
-		// }
+		if ret != TEST_EXIT_CODE_VERIFICATION_FAILED {
+			t.Fatalf("Other error than fake signature detected")
+		}
 	}
 }
 
-type killHook func()
+func testBuildGoSource(goExecutablePath string, goSourcePath string) error {
+	err := testGetCmd([]string{"go", "build", "-o", goExecutablePath, goSourcePath}).Run()
+	if err != nil {
+		return fmt.Errorf("Error building (%s): %s", goSourcePath, err.Error())
+	}
+	return nil
+}
 
-func testClientVerification(t *testing.T, serverFlag string, debug bool) (ret int, err error, f killHook) {
-	// testCmd := exec.Command("/bin/bash", "/home/cyrill/go/src/github.com/cyrill-k/dns/client/s", "start")
-	// err = testCmd.Run()
-	// if err != nil {
-	// 	log.Printf("test script failed: %s", err.Error())
-	// 	ret, _ = testGetErrorCode(err)
-	// 	return
-	// }
+func testGetCmd(args []string) *exec.Cmd {
+	if len(args) == 0 {
+		panic("Executing empty argument list")
+	}
+	var b strings.Builder
+	b.Write([]byte("Executing: "))
+	for i, s := range args {
+		if i != 0 {
+			b.Write([]byte(" "))
+		}
+		b.Write([]byte(s))
+	}
+	log.Println(b.String())
+	return exec.Command(args[0], args[1:]...)
+}
 
-	scionCmd := exec.Command("/bin/bash", "scion.sh", "start")
+func testClientVerification(t *testing.T, serverFlag string, debug bool) (ret int, err error) {
+	// Starting SCION
+	scionCmd := testGetCmd([]string{"/bin/bash", "scion.sh", "start"})
 	scionCmd.Dir = *scionDir
 	if debug {
 		scionCmd.Stdout = os.Stdout
@@ -87,54 +88,52 @@ func testClientVerification(t *testing.T, serverFlag string, debug bool) (ret in
 		return
 	}
 
-	// // start test go app
-	// goTest := exec.Command("go", "run", "/home/cyrill/go/src/github.com/cyrill-k/dns/client/test/output.go")
-	// goTest.Stdout = os.Stdout
-	// goTest.Stderr = os.Stderr
-	// err = goTest.Run()
-	// if err != nil {
-	// 	// log.Println(out)
-	// 	// if exiterr, ok := err.(*exec.ExitError); ok {
-	// 	// 	log.Printf("%s\n", string(exiterr.Stderr))
-	// 	// }
-	// 	ret, _ = testGetErrorCode(err)
-	// 	err = fmt.Errorf("Error executing the test go app: %s\n", err.Error())
-	// 	return
-	// } else {
-	// 	log.Println("Successfully ran go test app")
-	// 	// log.Println(out)
-	// }
+	// Build PILA server
+	goServerPath := path.Join(*pilaServer, "main.go")
+	goServerExePath := path.Join(*pilaServer, "main")
+	err = testBuildGoSource(goServerExePath, goServerPath)
+	if err != nil {
+		return
+	}
+
+	// Build PILA client
+	goClientPath := path.Join(*pilaClient, "main.go")
+	goClientExePath := path.Join(*pilaClient, "main")
+	err = testBuildGoSource(goClientExePath, goClientPath)
+	if err != nil {
+		return
+	}
 
 	// Start PILA server in background
 	var goServer *exec.Cmd
 	if serverFlag == "" {
-		goServer = exec.Command("go", "run", path.Join(*pilaServer, "main.go"))
+		goServer = testGetCmd([]string{goServerExePath})
 	} else {
-		goServer = exec.Command("go", "run", path.Join(*pilaServer, "main.go"), serverFlag)
+		goServer = testGetCmd([]string{goServerExePath, serverFlag})
 	}
 	if debug {
 		goServer.Stdout = os.Stdout
 		goServer.Stderr = os.Stderr
 	}
+	// allow killing process spawned by goServer process
+	testAllowProcessKill(goServer)
 	err = goServer.Start()
 	if err != nil {
 		ret, _ = testGetErrorCode(err)
 		return
 	}
+
 	defer func() {
-		log.Printf("Cleaning up the go server: %v", goServer)
-		//testKillProcess(goServer.Process)
-		//goServer.Process.Kill()
-		// if goServer.ProcessState == nil || !goServer.ProcessState.Exited() {
-		// 	log.Printf("Cleaning up the go server: %v", goServer.ProcessState)
-		// 	goServer.Process.Kill()
-		// }
+		log.Printf("Cleaning up the go server...", goServer)
+		testKillProcess(goServer.Process)
 	}()
+	//todo(cyrill): optimize by reading server output and
+	// continuing as soon as "Starting at XXXX" is read
 	d, _ := time.ParseDuration("2s")
 	time.Sleep(d)
 
 	// Start PILA client
-	goClient := exec.Command("go", "run", path.Join(*pilaClient, "main.go"))
+	goClient := testGetCmd([]string{goClientExePath})
 	if debug {
 		goClient.Stdout = os.Stdout
 		goClient.Stderr = os.Stderr
@@ -142,14 +141,18 @@ func testClientVerification(t *testing.T, serverFlag string, debug bool) (ret in
 	err = goClient.Run()
 	if err != nil {
 		var found bool
-		ret, found = testGetErrorCode(err)
-		log.Printf("goClient.ret = %d; found = %v", ret, found)
+		ret, _ = testGetErrorCode(err)
 		err = fmt.Errorf("Error executing the go client: %s\n", err.Error())
 	}
-	f = func() { testKillProcess(goServer.Process) }
-	return ret, err, f
+	return
 }
 
+// allow killing process spawned by this command
+func testAllowProcessKill(cmd *os.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}
+
+// Kill p and processes spawned by it (testAllowProcessKill should be called in advance)
 func testKillProcess(p *os.Process) {
 	pgid, err := syscall.Getpgid(p.Pid)
 	if err == nil {
