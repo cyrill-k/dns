@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -187,13 +186,9 @@ func (c *Client) exchange(m *Msg, a string) (r *Msg, rtt time.Duration, err erro
 	t := time.Now()
 	// write with the appropriate write timeout
 	co.SetWriteDeadline(t.Add(c.getTimeoutForRequest(c.writeTimeout())))
-
-	log.Println("test2")
 	if err = co.WriteMsg(m); err != nil {
 		return nil, 0, err
 	}
-
-	log.Println("test")
 
 	co.SetReadDeadline(time.Now().Add(c.getTimeoutForRequest(c.readTimeout())))
 	r, err = co.ReadMsg()

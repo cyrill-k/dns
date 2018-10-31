@@ -66,17 +66,19 @@ func handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	if !*nosigFlag {
+		var packedOriginalMessage []byte
+		r.PackBuffer(packedOriginalMessage)
 		if *randomsigFlag {
 			log.Println("randomsig")
 			// Replace signature with a random value of the same length
-			err = config.PilaSign(m, signer, net.ParseIP(host),
+			err = config.PilaSign(m, packedOriginalMessage, signer, net.ParseIP(host),
 				func(in []byte) []byte {
 					r, _ := dns.GenerateRandomness(len(in))
 					return r
 				})
 		} else {
 			log.Println("noop postsign function")
-			err = config.PilaSign(m, signer, net.ParseIP(host), dns.PostSignNoOp)
+			err = config.PilaSign(m, packedOriginalMessage, signer, net.ParseIP(host), dns.PostSignNoOp)
 		}
 		if err != nil {
 			log.Printf("[Server] Error signing response: " + err.Error())
@@ -138,7 +140,9 @@ func main() {
 		dns.DebugPrint("response1", response)
 
 		host := "127.0.0.1"
-		if err := config.PilaSign(response, signer, net.ParseIP(host), dns.PostSignNoOp); err != nil {
+		var packedOriginalMessage []byte
+		req.PackBuffer(packedOriginalMessage)
+		if err := config.PilaSign(response, packedOriginalMessage, signer, net.ParseIP(host), dns.PostSignNoOp); err != nil {
 			log.Println("Error in PilaSign: " + err.Error())
 		}
 		dns.DebugPrint("response2", response)

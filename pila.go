@@ -493,7 +493,7 @@ func GenerateKeyTag() uint16 {
 	return 42
 }
 
-func (conf *PilaConfig) PilaSign(m *Msg, signalg SignerWithAlgorithm, peerIP net.IP, postSign PostSignFunction) error {
+func (conf *PilaConfig) PilaSign(m *Msg, packedOriginalMessage []byte, signalg SignerWithAlgorithm, peerIP net.IP, postSign PostSignFunction) error {
 	pub, err := GetPublicKeyWithAlgorithm(signalg)
 	if err != nil {
 		return errors.New("Failed to extract public key to send to the certificate server: " + err.Error())
@@ -506,7 +506,7 @@ func (conf *PilaConfig) PilaSign(m *Msg, signalg SignerWithAlgorithm, peerIP net
 	}
 	//todo(cyrill): adjust parameters
 	sigrr := createPilaSIG(signalg.Algorithm(), GenerateKeyTag(), pilaSIGNameString)
-	additionalInfo, err := sigrr.getAdditionalInfo(m.Request, Encode(peerIP))
+	additionalInfo, err := sigrr.getAdditionalInfo(packedOriginalMessage, Encode(peerIP))
 	if err != nil {
 		return errors.New("Failed to extract additional info from request")
 	}

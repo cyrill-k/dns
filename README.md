@@ -47,8 +47,8 @@ A not-so-up-to-date-list-that-may-be-actually-current:
 * https://github.com/benschw/dns-clb-go
 * https://github.com/corny/dnscheck for http://public-dns.info/
 * https://namesmith.io
-* https://github.com/cyrill-k/unbound
-* https://github.com/cyrill-k/exdns
+* https://github.com/miekg/unbound
+* https://github.com/miekg/exdns
 * https://dnslookup.org
 * https://github.com/looterz/grimd
 * https://github.com/phamhongviet/serf-dns
