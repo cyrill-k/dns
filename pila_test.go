@@ -124,7 +124,7 @@ func testClientVerification(t *testing.T, serverFlag string, debug bool) (ret in
 	}
 
 	defer func() {
-		log.Printf("Cleaning up the go server...", goServer)
+		log.Printf("Cleaning up the go server...")
 		testKillProcess(goServer.Process)
 	}()
 	//todo(cyrill): optimize by reading server output and
@@ -140,7 +140,6 @@ func testClientVerification(t *testing.T, serverFlag string, debug bool) (ret in
 	}
 	err = goClient.Run()
 	if err != nil {
-		var found bool
 		ret, _ = testGetErrorCode(err)
 		err = fmt.Errorf("Error executing the go client: %s\n", err.Error())
 	}
@@ -148,7 +147,7 @@ func testClientVerification(t *testing.T, serverFlag string, debug bool) (ret in
 }
 
 // allow killing process spawned by this command
-func testAllowProcessKill(cmd *os.Cmd) {
+func testAllowProcessKill(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
