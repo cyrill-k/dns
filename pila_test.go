@@ -21,8 +21,8 @@ const (
 var (
 	verification = flag.Bool("verification", false, "run PILA verification tests")
 	scionDir     = flag.String("scion", "/home/cyrill/go/src/github.com/scionproto/scion", "Scion start script folder (must contain scion.sh)")
-	pilaServer   = flag.String("server", "/home/cyrill/go/src/github.com/cyrill-k/dns/server", "PILA GO client folder")
-	pilaClient   = flag.String("client", "/home/cyrill/go/src/github.com/cyrill-k/dns/client", "PILA GO server folder")
+	pilaServer   = flag.String("server", "/home/cyrill/go/src/github.com/cyrill-k/dns/pila/server", "PILA GO client folder")
+	pilaClient   = flag.String("client", "/home/cyrill/go/src/github.com/cyrill-k/dns/pila/client", "PILA GO server folder")
 )
 
 func TestPilaSign(t *testing.T) {

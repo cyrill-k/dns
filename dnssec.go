@@ -799,3 +799,7 @@ func packKeyWire(dw *dnskeyWireFmt, msg []byte) (int, error) {
 	}
 	return off, nil
 }
+
+func (*PilaUtility) Sign(k crypto.Signer, hashed []byte, hash crypto.Hash, alg uint8) ([]byte, error) {
+	return sign(k, hashed, hash, alg)
+}
