@@ -158,10 +158,15 @@ func (conf *PilaConfig) PilaSign(m *dns.Msg, packedOriginalMessage []byte, signa
 		return errors.New("Failed to extract additional info from request")
 	}
 
-	// Sign message + verification context
-	_, err = pilaSignRR(sigrr, signalg.Signer(), m, additionalInfo, postSign)
+	// Sign message + verification context & add SIG resource record
+	signedMsgPacked, err := pilaSignRR(sigrr, signalg.Signer(), m, additionalInfo, postSign)
 	if err != nil {
 		return errors.New("Failed PILA signature: " + err.Error())
+	}
+
+	// Set SIG resource record in response
+	if err := m.Unpack(signedMsgPacked); err != nil {
+		return errors.New("Failed to unpack signed msg: " + err.Error())
 	}
 
 	return nil
@@ -210,7 +215,7 @@ func (conf *PilaConfig) PilaVerify(m *dns.Msg, packedOriginalMessage []byte, sig
 	default:
 		return errors.New("Unsupported signing algorithm in endpoint certificate: " + pilaChain.Endpoint.SignAlgorithm)
 	}
-	pubKeyBase64 := toBase64(pilaChain.Endpoint.SubjectSignKey)
+	pubKeyBase64 := u.ToBase64(pilaChain.Endpoint.SubjectSignKey)
 
 	// Create verification context based on original message & local endpoint identifier
 	additionalInfo, err := getAdditionalInfo(sigrr, packedOriginalMessage, encode(localIp))
@@ -307,12 +312,12 @@ func pilaSignRR(rr *dns.SIG, k crypto.Signer, m *dns.Msg, additionalInfo []byte,
 		return nil, err
 	}
 
-	log.Println("Before: " + toBase64(signature))
+	log.Println("Before: " + u.ToBase64(signature))
 	//todo(cyrill): Maybe put somewhere else (testing purposes only)
 	signature = postSign(signature)
-	log.Println("After: " + toBase64(signature))
+	log.Println("After: " + u.ToBase64(signature))
 
-	rr.Signature = toBase64(signature)
+	rr.Signature = u.ToBase64(signature)
 
 	buf = append(buf, signature...)
 	if len(buf) > int(^uint16(0)) {
@@ -444,7 +449,7 @@ func pilaVerifyRR(rr *dns.SIG, k *dns.KEY, buf []byte, additionalInfo []byte) er
 	sig := buf[sigend:]
 	switch k.Algorithm {
 	case dns.DSA:
-		pk := publicKeyDSA(k)
+		pk := u.PublicKeyDSA(k)
 		sig = sig[1:]
 		r := big.NewInt(0)
 		r.SetBytes(sig[:len(sig)/2])
@@ -457,12 +462,12 @@ func pilaVerifyRR(rr *dns.SIG, k *dns.KEY, buf []byte, additionalInfo []byte) er
 			return dns.ErrSig
 		}
 	case dns.RSASHA1, dns.RSASHA256, dns.RSASHA512:
-		pk := publicKeyRSA(k)
+		pk := u.PublicKeyRSA(k)
 		if pk != nil {
 			return rsa.VerifyPKCS1v15(pk, hash, hashed, sig)
 		}
 	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
-		pk := publicKeyECDSA(k)
+		pk := u.PublicKeyECDSA(k)
 		r := big.NewInt(0)
 		r.SetBytes(sig[:len(sig)/2])
 		s := big.NewInt(0)

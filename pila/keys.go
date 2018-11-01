@@ -2,21 +2,15 @@ package pila
 
 import (
 	"crypto"
-	"crypto/dsa"
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/rsa"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"io/ioutil"
 	"log"
-	"math/big"
 
 	"github.com/cyrill-k/dns"
-
-	"golang.org/x/crypto/ed25519"
 )
 
 type SignerWithAlgorithm interface {
@@ -39,7 +33,7 @@ func GetPublicKeyWithAlgorithm(signalg SignerWithAlgorithm) (PublicKeyWithAlgori
 }
 
 func GetPublicKeyRaw(pubKey PublicKeyWithAlgorithm) ([]byte, error) {
-	return fromBase64([]byte(pubKey.PublicKeyBase64()))
+	return u.FromBase64([]byte(pubKey.PublicKeyBase64()))
 }
 
 type ECDSASigner struct {
@@ -71,7 +65,7 @@ func (pub *ECDSAPublicKey) PublicKeyBase64() string {
 	buffer := make([]byte, lenbuf)
 	copy(buffer[:lenbuf/2], pub.PublicKey.X.Bytes())
 	copy(buffer[lenbuf/2:], pub.PublicKey.Y.Bytes())
-	return toBase64(buffer)
+	return u.ToBase64(buffer)
 }
 
 func (pub *ECDSAPublicKey) Algorithm() uint8 {

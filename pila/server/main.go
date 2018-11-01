@@ -185,7 +185,7 @@ func main() {
 
 	// start server
 	port := 7501
-	server := &dns.Server{Addr: ":" + strconv.Itoa(port), Net: "udp"}
+	server := &dns.Server{Addr: ":" + strconv.Itoa(port), Net: "udp", NotifyStartedFunc: func() { log.Printf("Listening at %d\n", port) }}
 	log.Printf("Starting at %d\n", port)
 	err := server.ListenAndServe()
 	defer server.Shutdown()

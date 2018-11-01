@@ -40,7 +40,7 @@ func createPilaSIG(algorithm uint8) *dns.SIG {
 	sigrr.SignerName = pilaSIGNameString
 	//sigrr.Signature = "" default value
 	domainNameLength, _ := dns.PackDomainName(sigrr.SignerName, nil, 0, nil, false)
-	signatureWireFormat, _ := fromBase64([]byte(sigrr.Signature))
+	signatureWireFormat, _ := u.FromBase64([]byte(sigrr.Signature))
 	signatureWireLength := len(signatureWireFormat)
 	sigrr.Header().Rdlength = 2 + 1 + 1 + 4 + 4 + 4 + 2 + uint16(domainNameLength) + uint16(signatureWireLength)
 	return sigrr

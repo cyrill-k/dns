@@ -1,6 +1,8 @@
-package dns
+package pila
 
 import (
+	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -10,7 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
+	_ "time"
 )
 
 const (
@@ -44,7 +46,7 @@ func TestPilaVerify(t *testing.T) {
 		t.Fatalf("Fake signature was accepted by client")
 	} else {
 		if ret != TEST_EXIT_CODE_VERIFICATION_FAILED {
-			t.Fatalf("Other error than fake signature detected")
+			t.Fatalf("Other error than fake signature detected: " + err.Error())
 		}
 	}
 }
@@ -113,13 +115,37 @@ func testClientVerification(t *testing.T, serverFlag string, debug bool) (ret in
 	}
 	if debug {
 		goServer.Stdout = os.Stdout
-		goServer.Stderr = os.Stderr
+		//goServer.Stderr = os.Stderr
 	}
 	// allow killing process spawned by goServer process
 	testAllowProcessKill(goServer)
+
+	// Get stdout reader
+	serverReader, err := goServer.StderrPipe()
+	if err != nil {
+		err = errors.New("Error getting stdout pipe: " + err.Error())
+		return
+	}
+
+	// Start server
 	err = goServer.Start()
 	if err != nil {
 		ret, _ = testGetErrorCode(err)
+		return
+	}
+
+	// Read until a line beginning with "Listening at " is read
+	serverScanner := bufio.NewScanner(serverReader)
+	var serverListening bool
+	for serverScanner.Scan() {
+		log.Println("Server stderr line: \"" + serverScanner.Text() + "\"")
+		if strings.Contains(serverScanner.Text(), "Listening at ") {
+			serverListening = true
+			break
+		}
+	}
+	if !serverListening {
+		err = fmt.Errorf("Server could not be started: %v", serverScanner.Err())
 		return
 	}
 
@@ -129,8 +155,8 @@ func testClientVerification(t *testing.T, serverFlag string, debug bool) (ret in
 	}()
 	//todo(cyrill): optimize by reading server output and
 	// continuing as soon as "Starting at XXXX" is read
-	d, _ := time.ParseDuration("2s")
-	time.Sleep(d)
+	//d, _ := time.ParseDuration("2s")
+	//time.Sleep(d)
 
 	// Start PILA client
 	goClient := testGetCmd([]string{goClientExePath})

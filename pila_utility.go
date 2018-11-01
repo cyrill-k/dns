@@ -20,19 +20,19 @@ func (*PilaUtility) FromBase64(s []byte) (buf []byte, err error) {
 
 func (*PilaUtility) ToBase64(b []byte) string { return toBase64(b) }
 
-func (*PilaUtility) PublicKeyRSA(k *DNSKEY) *rsa.PublicKey {
+func (*PilaUtility) PublicKeyRSA(k *KEY) *rsa.PublicKey {
 	return k.publicKeyRSA()
 }
 
-func (*PilaUtility) PublicKeyECDSA(k *DNSKEY) *ecdsa.PublicKey {
+func (*PilaUtility) PublicKeyECDSA(k *KEY) *ecdsa.PublicKey {
 	return k.publicKeyECDSA()
 }
 
-func (*PilaUtility) PublicKeyDSA(k *DNSKEY) *dsa.PublicKey {
+func (*PilaUtility) PublicKeyDSA(k *KEY) *dsa.PublicKey {
 	return k.publicKeyDSA()
 }
 
-func (*PilaUtility) PublicKeyED25519(k *DNSKEY) ed25519.PublicKey {
+func (*PilaUtility) PublicKeyED25519(k *KEY) ed25519.PublicKey {
 	return k.publicKeyED25519()
 }
 
