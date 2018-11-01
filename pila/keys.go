@@ -8,7 +8,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"io/ioutil"
-	"log"
 
 	"github.com/cyrill-k/dns"
 )
@@ -24,7 +23,6 @@ type PublicKeyWithAlgorithm interface {
 }
 
 func GetPublicKeyWithAlgorithm(signalg SignerWithAlgorithm) (PublicKeyWithAlgorithm, error) {
-	log.Printf("get pub key: %T\n", signalg)
 	switch signalg.Signer().(type) {
 	case *ecdsa.PrivateKey:
 		return NewECDSAPublicKey(signalg.Signer().Public().(*ecdsa.PublicKey)), nil

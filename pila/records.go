@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -104,7 +103,6 @@ func logSIG(data []byte, lengthHeaderName int, lengthSignerName int, totalLength
 // ***** PILA KEY
 
 func createPilaKEY(protocol uint8, algorithm uint8, publicKeyBase64 string) *dns.KEY {
-	log.Println("createPilaKey")
 	key := new(dns.KEY)
 	key.Header().Name = pilaKEYNameString
 	key.Header().Rrtype = dns.TypeKEY
@@ -141,17 +139,10 @@ func createPilaTxtRecord(randomnessLength int, certificatesRaw []byte) ([]byte, 
 }
 
 func combineTxtResources(txtStrings []string) string {
-	var bLog strings.Builder
 	var b strings.Builder
-	for i, s := range txtStrings {
+	for _, s := range txtStrings {
 		b.Write([]byte(s))
-		if i != 0 {
-			bLog.Write([]byte(", "))
-		}
-		bLog.Write([]byte(fmt.Sprintf("(%d)", len(s))))
 	}
-	bLog.Write([]byte(fmt.Sprintf(" tot = %d", len(b.String()))))
-	log.Println(bLog.String())
 	return b.String()
 }
 
@@ -223,8 +214,6 @@ func getPilaTxtRecord(m *dns.Msg, doNotDecodeTxtStrings ...bool) (*PilaTxtStruct
 	if rr == nil {
 		return nil, errors.New("No txt records present")
 	}
-	log.Printf("last extra record: %s", rr.String())
-
 	var shouldNotDecodeTxtStrings bool
 	if len(doNotDecodeTxtStrings) == 1 {
 		shouldNotDecodeTxtStrings = doNotDecodeTxtStrings[0]
@@ -238,7 +227,6 @@ func getPilaTxtRecord(m *dns.Msg, doNotDecodeTxtStrings ...bool) (*PilaTxtStruct
 	if len(rr.Txt) == 0 {
 		return nil, errors.New("Empty txt record")
 	}
-	log.Printf("len(rr.Txt) = %d", len(rr.Txt))
 
 	var decodedStrings []string
 	if !shouldNotDecodeTxtStrings {
@@ -252,10 +240,6 @@ func getPilaTxtRecord(m *dns.Msg, doNotDecodeTxtStrings ...bool) (*PilaTxtStruct
 		}
 	} else {
 		decodedStrings = rr.Txt
-	}
-	log.Println("Decoded strings:")
-	for i, s := range decodedStrings {
-		log.Printf("[%d] %s\n", i, s)
 	}
 	txtStringsCombined := combineTxtResources(decodedStrings)
 	var s PilaTxtStruct

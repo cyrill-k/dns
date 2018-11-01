@@ -12,7 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	_ "time"
+	"time"
 )
 
 const (
@@ -85,7 +85,7 @@ func testClientVerification(t *testing.T, serverFlag string, debug bool) (ret in
 	}
 	err = scionCmd.Run()
 	if err != nil {
-		log.Printf("scion script failed: %s", err.Error())
+		err = fmt.Errorf("scion script failed: %s", err.Error())
 		ret, _ = testGetErrorCode(err)
 		return
 	}
@@ -99,10 +99,12 @@ func testClientVerification(t *testing.T, serverFlag string, debug bool) (ret in
 	}
 
 	f, err := testStartServer(serverFlag, debug)
+	if f != nil {
+		defer f()
+	}
 	if err != nil {
 		return
 	}
-	defer f()
 
 	// Start PILA client
 	goClient := testGetCmd([]string{goClientExePath})
@@ -118,7 +120,8 @@ func testClientVerification(t *testing.T, serverFlag string, debug bool) (ret in
 	return
 }
 
-func testStartServer(serverFlag string, debug bool) (f func(), err error) {
+// Opens an instance of a PILA server and returns err = nil if the server is listening and ready to accept requests or a non-nil error describing the error that occurred. If the process has not exited when the function returns, f contains a clean up function for the server and its children.
+func testStartServer(serverFlag string, debug bool) (cleanUp func(), err error) {
 	// Build PILA server
 	goServerPath := path.Join(*pilaServer, "main.go")
 	goServerExePath := path.Join(*pilaServer, "main")
@@ -138,8 +141,15 @@ func testStartServer(serverFlag string, debug bool) (f func(), err error) {
 		goServer.Stdout = os.Stdout
 		//goServer.Stderr = os.Stderr
 	}
+
 	// allow killing process spawned by goServer process
 	testAllowProcessKill(goServer)
+
+	// pass clean up function to caller
+	cleanUp = func() {
+		log.Printf("Cleaning up the go server...")
+		testKillProcess(goServer.Process)
+	}
 
 	// Get stdout reader
 	serverReader, err := goServer.StderrPipe()
@@ -151,34 +161,38 @@ func testStartServer(serverFlag string, debug bool) (f func(), err error) {
 	// Start server
 	err = goServer.Start()
 	if err != nil {
-		//		ret, _ = testGetErrorCode(err)
 		return
 	}
 
 	// Read until a line beginning with "Listening at " is read
 	serverScanner := bufio.NewScanner(serverReader)
-	var serverListening bool
-	for serverScanner.Scan() {
-		log.Println("Server stderr line: \"" + serverScanner.Text() + "\"")
-		if strings.Contains(serverScanner.Text(), "Listening at ") {
-			serverListening = true
-			break
+	serverError := make(chan error, 1)
+	go func() {
+		for serverScanner.Scan() {
+			log.Println("[Server stderr]: " + serverScanner.Text())
+			if strings.Contains(serverScanner.Text(), "Listening at ") {
+				serverError <- nil
+				return
+			}
 		}
-	}
-	if !serverListening {
-		err = fmt.Errorf("Server could not be started: %v", serverScanner.Err())
-		return
+		if serverScanner.Err() == nil {
+			serverError <- errors.New("Scanner reached EOF (Server process probably quit)")
+		} else {
+			serverError <- serverScanner.Err()
+		}
+	}()
+
+	// Wait for timeout or error
+	select {
+	case err = <-serverError:
+		if err != nil {
+			err = fmt.Errorf("Server could not be started: %v", err.Error())
+		}
+	case <-time.After(2 * time.Second):
+		err = fmt.Errorf("Timeout waiting for server to start")
 	}
 
-	return func() {
-		log.Printf("Cleaning up the go server...")
-		testKillProcess(goServer.Process)
-	}, nil
-
-	//todo(cyrill): optimize by reading server output and
-	// continuing as soon as "Starting at XXXX" is read
-	//d, _ := time.ParseDuration("2s")
-	//time.Sleep(d)
+	return
 }
 
 // allow killing process spawned by this command

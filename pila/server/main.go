@@ -4,7 +4,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -25,9 +24,7 @@ var (
 	generateKeys  = flag.Bool("gen", false, "generate new public/private ECDSA keys")
 	keyFolder     = flag.String("genfolder", "-", "folder where the ECDSA keys are saved")
 	debugFlag     = flag.Bool("debug", false, "Enable debug mode")
-	testingFlag   = flag.Bool("test", false, "Enable testing mode")
 	randomsigFlag = flag.Bool("randomsig", false, "Replace signature in the PILA SIG record with random data")
-	nosigFlag     = flag.Bool("nosig", false, "Do not attach a PILA SIG record")
 
 	signer pila.SignerWithAlgorithm
 
@@ -38,7 +35,7 @@ func parseQuery(m *dns.Msg) {
 	for _, q := range m.Question {
 		switch q.Qtype {
 		case dns.TypeA:
-			log.Printf("Query for %s\n", q.Name)
+			log.Printf("[Server] Query for %s\n", q.Name)
 			ip := records[q.Name]
 			if ip != "" {
 				rr, err := dns.NewRR(fmt.Sprintf("%s A %s", q.Name, ip))
@@ -51,6 +48,7 @@ func parseQuery(m *dns.Msg) {
 }
 
 func handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
+	log.Printf("[Server] Received request (id=%d)\n", r.Id)
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Compress = false
@@ -66,36 +64,32 @@ func handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	if !*nosigFlag {
-		var packedOriginalMessage []byte
-		r.PackBuffer(packedOriginalMessage)
-		if *randomsigFlag {
-			log.Println("randomsig")
-			// Replace signature with a random value of the same length
-			err = config.PilaSign(m, packedOriginalMessage, signer, net.ParseIP(host),
-				func(in []byte) []byte {
-					r, _ := pila.GenerateRandomness(len(in))
-					return r
-				})
-		} else {
-			log.Println("noop postsign function")
-			err = config.PilaSign(m, packedOriginalMessage, signer, net.ParseIP(host), pila.PostSignNoOp)
-		}
-		if err != nil {
-			log.Printf("[Server] Error signing response: " + err.Error())
-			return
-		}
+	var packedOriginalMessage []byte
+	r.PackBuffer(packedOriginalMessage)
+	if *randomsigFlag {
+		// Replace signature with a random value of the same length
+		err = config.PilaSign(m, packedOriginalMessage, signer, net.ParseIP(host),
+			func(in []byte) []byte {
+				r, _ := pila.GenerateRandomness(len(in))
+				return r
+			})
+	} else {
+		err = config.PilaSign(m, packedOriginalMessage, signer, net.ParseIP(host), pila.PostSignNoOp)
+	}
+	if err != nil {
+		log.Printf("[Server] Error signing response: " + err.Error())
+		return
 	}
 
-	out, _ := m.Pack()
-	log.Printf("Sending reply of size %d (buflen = %d): %s\n", m.Len(), len(out), m)
+	log.Printf("[Server]: Sending reply (id=%d)\n", m.Id)
 	w.WriteMsg(m)
 }
 
 func main() {
+	// Parse CLI
 	flag.Parse()
-	log.Printf("randomsig = %v\n", *randomsigFlag)
 
+	// Create default PILA config
 	config = pila.DefaultConfig()
 	config.InitializeEnvironment()
 
@@ -124,59 +118,27 @@ func main() {
 	priv, _ := pila.ReadKeys(privPath, pubPath)
 	signer = pila.NewECDSASigner(priv)
 
-	_, pub := pila.ReadKeys(privPath, pubPath)
-	verifier := pila.NewECDSAPublicKey(pub)
-
 	if *debugFlag {
 		req := new(dns.Msg)
 		req.SetQuestion("test.service.", dns.TypeA)
-		pila.DebugPrint("req1", req)
 		config.PilaRequestSignature(req)
-		pila.DebugPrint("req2", req)
 
 		response := req.Copy()
 		response.SetReply(req)
 		response.Compress = false
 		parseQuery(response)
-		pila.DebugPrint("response1", response)
 
 		host := "127.0.0.1"
 		var packedOriginalMessage []byte
 		req.PackBuffer(packedOriginalMessage)
 		if err := config.PilaSign(response, packedOriginalMessage, signer, net.ParseIP(host), pila.PostSignNoOp); err != nil {
-			log.Println("Error in PilaSign: " + err.Error())
+			log.Println("[SERVER DEBUG] Error in PilaSign: " + err.Error())
 		}
-		pila.DebugPrint("response2", response)
 
-		if err := config.PilaVerify(response, packedOriginalMessage, verifier, net.ParseIP(host)); err != nil {
-			log.Println("Error in PilaVerify: " + err.Error())
+		if err := config.PilaVerify(response, packedOriginalMessage, net.ParseIP(host)); err != nil {
+			log.Println("[SERVER DEBUG] Error in PilaVerify: " + err.Error())
 		}
-		pila.DebugPrint("response3", response)
 
-		//TODO: write tests
-
-		return
-	}
-
-	if *testingFlag {
-		s := &S{Ivalue: &Impl1{val: "test"}}
-		marshalled, err := json.Marshal(s)
-		if err != nil {
-			panic(err.Error())
-		}
-		log.Println(string(marshalled))
-		sNew := &S{}
-		err = json.Unmarshal(marshalled, sNew)
-		if err != nil {
-			panic(err.Error())
-		}
-		log.Println("val = " + sNew.Ivalue.f())
-
-		return
-	}
-
-	if *randomsigFlag && *nosigFlag {
-		log.Println("Either randomsig OR nosig can be specified; Not both")
 		return
 	}
 
@@ -185,53 +147,11 @@ func main() {
 
 	// start server
 	port := 7501
-	server := &dns.Server{Addr: ":" + strconv.Itoa(port), Net: "udp", NotifyStartedFunc: func() { log.Printf("Listening at %d\n", port) }}
-	log.Printf("Starting at %d\n", port)
+	server := &dns.Server{Addr: ":" + strconv.Itoa(port), Net: "udp", NotifyStartedFunc: func() { log.Printf("[Server] Listening at %d\n", port) }}
+	log.Printf("[Server] Starting at %d\n", port)
 	err := server.ListenAndServe()
 	defer server.Shutdown()
 	if err != nil {
-		log.Fatalf("Failed to start server: %s\n ", err.Error())
+		log.Fatalf("[Server] Failed to start server: %s\n ", err.Error())
 	}
-}
-
-type I interface {
-	MarshalText() ([]byte, error)
-	UnmarshalText(text []byte) error
-	f() string
-}
-
-const (
-	type1 uint8 = 7
-	type2 uint8 = 42
-)
-
-type Istruct struct {
-	typeFieldHidden uint8
-	impl            I
-}
-
-func (i Istruct) MarshalText() ([]byte, error) {
-	return i.MarshalText()
-}
-
-type Impl1 struct {
-	Istruct
-	val string
-}
-
-func (impl Impl1) MarshalText() ([]byte, error) {
-	return []byte(impl.val), nil
-}
-
-func (impl *Impl1) UnmarshalText(text []byte) error {
-	impl.val = string(text)
-	return nil
-}
-
-func (impl Impl1) f() string {
-	return impl.val
-}
-
-type S struct {
-	Ivalue *Impl1
 }

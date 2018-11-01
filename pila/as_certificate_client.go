@@ -40,15 +40,12 @@ func NewASCertificateHandler(config *PilaConfig) *ASCertificateHandler {
 
 func (h *ASCertificateHandler) initIfNecessary() error {
 	if snet.DefNetwork == nil {
-		log.Printf("snet.Init: lIA = %s, sciond path = \"%s\", dispatcher path = \"%s\"",
-			h.config.lIA.String(), h.config.sciondPath, h.config.dispatcherPath)
 		return snet.Init(h.config.lIA, h.config.sciondPath, h.config.dispatcherPath)
 	}
 	return nil
 }
 
 func (h *ASCertificateHandler) createASCertificateRequest(publicKey PublicKeyWithAlgorithm) ([]byte, error) {
-	log.Println("createASCertificateRequest")
 	publicKeyRaw, _ := GetPublicKeyRaw(publicKey)
 	req := &cert_mgmt.PilaReq{
 		SignedName: pilaASCertificateSignedName,
@@ -133,7 +130,7 @@ func (h *ASCertificateHandler) PilaRequestASCertificate(publicKey PublicKeyWithA
 		return nil, err
 	}
 
-	log.Println("PilaRequestASCertificate: lAddr = " + h.config.lAddr.String() + ", csAddr = " + h.config.csAddr.String())
+	log.Println("[ASCertificateClient] PilaRequestASCertificate(): lAddr = " + h.config.lAddr.String() + ", csAddr = " + h.config.csAddr.String())
 	if h.conn == nil {
 		conn, err := snet.DialSCION("udp4", h.config.lAddr, h.config.csAddr)
 		if err != nil {
@@ -163,11 +160,10 @@ func (h *ASCertificateHandler) PilaRequestASCertificate(publicKey PublicKeyWithA
 		n, err := h.conn.Read(readBuffer)
 		if err != nil {
 			// Do note return with error, retry up to MaxTries
-			log.Printf("Error reading AS cert response from certificate server (numtries=%d): %s\n", numtries, err.Error())
+			log.Printf("[ASCertificateClient] Error reading AS certificate response from certificate server (try#=%d): %s\n", numtries, err.Error())
 			numtries++
 			continue
 		}
-		log.Println("Read PILA AS cert reply (" + strconv.Itoa(n) + "bytes)")
 		repBuf := readBuffer[:n]
 
 		// Remove read deadline
@@ -183,19 +179,10 @@ func (h *ASCertificateHandler) PilaRequestASCertificate(publicKey PublicKeyWithA
 			return nil, err
 		}
 
-		//		log.Println("AS cert reply (size=" + strconv.Itoa(len(reply)) + ")")
-
 		pilaChain, err := reply.PilaChain()
 		if err != nil {
 			return nil, err
 		}
-
-		jsonIssuer, err := pilaChain.Issuer.JSON(true)
-		jsonLeaf, err := pilaChain.Leaf.JSON(true)
-		jsonEndpoint, err := pilaChain.Endpoint.JSON(true)
-		log.Println("issuer = " + string(jsonIssuer))
-		log.Println("leaf = " + string(jsonLeaf))
-		log.Println("endpoint = " + string(jsonEndpoint))
 
 		if err := h.validateCertificate(pilaChain.Endpoint, publicKey); err != nil {
 			return nil, errors.New("Failed to validate reply from certificate server: " + err.Error())

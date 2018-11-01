@@ -13,7 +13,6 @@ import (
 	"math/big"
 	"net"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -173,7 +172,7 @@ func (conf *PilaConfig) PilaSign(m *dns.Msg, packedOriginalMessage []byte, signa
 }
 
 // rename remoteIP to localIP
-func (conf *PilaConfig) PilaVerify(m *dns.Msg, packedOriginalMessage []byte, signalg PublicKeyWithAlgorithm, localIp net.IP) error {
+func (conf *PilaConfig) PilaVerify(m *dns.Msg, packedOriginalMessage []byte, localIp net.IP) error {
 	// Retrieve (PILA) SIG record from message
 	sigrr, err := getPilaSIG(m)
 	if err != nil {
@@ -181,9 +180,6 @@ func (conf *PilaConfig) PilaVerify(m *dns.Msg, packedOriginalMessage []byte, sig
 	}
 	if sigrr == nil {
 		return errors.New("No PILA SIG record available")
-	}
-	if signalg.Algorithm() != sigrr.Algorithm {
-		return errors.New("Returned algrithm does not match expected algorithm")
 	}
 
 	// extract TXT record containing the certificate chain
@@ -200,7 +196,6 @@ func (conf *PilaConfig) PilaVerify(m *dns.Msg, packedOriginalMessage []byte, sig
 
 	// verify certificate chain using locally stored trc
 	trc, err := conf.readTrc()
-	log.Println(time.Now().String())
 	if err := pilaChain.Verify(cert.PilaCertificateEntity{Ipv4: localIp}, trc); err != nil {
 		return errors.New("Failed to verify PILA certificate chain: " + err.Error())
 	}
@@ -243,9 +238,6 @@ func pilaSignRR(rr *dns.SIG, k crypto.Signer, m *dns.Msg, additionalInfo []byte,
 		return nil, dns.ErrPrivKey
 	}
 	if rr.KeyTag == 0 || len(rr.SignerName) == 0 || rr.Algorithm == 0 {
-		log.Println(strconv.FormatUint(uint64(rr.KeyTag), 10))
-		log.Println(rr.SignerName)
-		log.Println(strconv.FormatUint(uint64(rr.Algorithm), 10))
 		return nil, dns.ErrKey
 	}
 	rr.Header().Rrtype = dns.TypeSIG
@@ -256,41 +248,21 @@ func pilaSignRR(rr *dns.SIG, k crypto.Signer, m *dns.Msg, additionalInfo []byte,
 	rr.TypeCovered = 0
 	rr.Labels = 0
 
-	// // Testing SIG pack and unpack methods
-	// testbuf := make([]byte, 1000)
-	// if _, err := rr.pack(testbuf, 0, nil, false); err != nil {
-	// 	log.Println("Error packing TEST SIG: " + err.Error())
-	// }
-	// header, offTest, _, err := unpackHeader(testbuf, 0)
-	// if err != nil {
-	// 	log.Println("Error unpacking TEST SIG header: " + err.Error())
-	// }
-	// testUnpacked, offTest, err := unpackSIG(header, testbuf, offTest)
-	// if err != nil {
-	// 	log.Println("Error unpacking TEST SIG: " + err.Error())
-	// }
-	// log.Println("SIG packing/unpacking: DeepEqual() = " + strconv.FormatBool(reflect.DeepEqual(rr, testUnpacked)))
-
-	log.Printf("m.Len() = %d, rr.len() = %d", m.Len(), u.Len(rr))
 	buf := make([]byte, m.Len()+u.Len(rr))
 	mbuf, err := m.PackBuffer(buf)
-	log.Println("test1")
 	if err != nil {
 		return nil, err
 	}
-	log.Println("test2")
 	if &buf[0] != &mbuf[0] {
 		return nil, dns.ErrBuf
 	}
 	off, err := dns.PackRR(rr, buf, len(mbuf), nil, false)
-	log.Println("test3")
 	if err != nil {
 		return nil, err
 	}
 	buf = buf[:off:cap(buf)]
 
 	hash, ok := dns.AlgorithmToHash[rr.Algorithm]
-	log.Println("test4")
 	if !ok {
 		return nil, dns.ErrAlg
 	}
@@ -298,10 +270,6 @@ func pilaSignRR(rr *dns.SIG, k crypto.Signer, m *dns.Msg, additionalInfo []byte,
 	hasher := hash.New()
 	// Write SIG rdata
 	hasher.Write(buf[len(mbuf)+1+2+2+4+2:])
-
-	// log.Print("buf after content (excluding SIGRR): ")
-	// log.Println(buf[len(mbuf) : len(mbuf)+1+2+2+4+2])
-
 	// Write message
 	hasher.Write(buf[:len(mbuf)])
 	// Write additional info
@@ -312,10 +280,7 @@ func pilaSignRR(rr *dns.SIG, k crypto.Signer, m *dns.Msg, additionalInfo []byte,
 		return nil, err
 	}
 
-	log.Println("Before: " + u.ToBase64(signature))
-	//todo(cyrill): Maybe put somewhere else (testing purposes only)
 	signature = postSign(signature)
-	log.Println("After: " + u.ToBase64(signature))
 
 	rr.Signature = u.ToBase64(signature)
 
@@ -339,8 +304,6 @@ func pilaSignRR(rr *dns.SIG, k crypto.Signer, m *dns.Msg, additionalInfo []byte,
 // Verify validates the message buf using the key k.
 // It's assumed that buf is a valid message from which rr was unpacked.
 func pilaVerifyRR(rr *dns.SIG, k *dns.KEY, buf []byte, additionalInfo []byte) error {
-	log.Println("pilaVerifyRR: len(buf) = " + strconv.Itoa(len(buf)) + ", len(addInfo) = " + strconv.Itoa(len(additionalInfo)))
-
 	if k == nil {
 		return dns.ErrKey
 	}
@@ -426,7 +389,6 @@ func pilaVerifyRR(rr *dns.SIG, k *dns.KEY, buf []byte, additionalInfo []byte) er
 	if err != nil {
 		return err
 	}
-	log.Println("Unpacked everything")
 	// If key has come from the DNS name compression might
 	// have mangled the case of the name
 	if strings.ToLower(signername) != strings.ToLower(k.Header().Name) {
@@ -442,8 +404,6 @@ func pilaVerifyRR(rr *dns.SIG, k *dns.KEY, buf []byte, additionalInfo []byte) er
 	hasher.Write(buf[12:bodyend])
 	// Write additional info
 	hasher.Write(additionalInfo)
-
-	log.Println("k.Algorithm = "+strconv.FormatUint(uint64(k.Algorithm), 10)+", ECDSAP256SHA256 = "+strconv.FormatUint(uint64(dns.ECDSAP256SHA256), 10), ", ECDSAP384SHA384 = "+strconv.FormatUint(uint64(dns.ECDSAP384SHA384), 10))
 
 	hashed := hasher.Sum(nil)
 	sig := buf[sigend:]
@@ -472,7 +432,6 @@ func pilaVerifyRR(rr *dns.SIG, k *dns.KEY, buf []byte, additionalInfo []byte) er
 		r.SetBytes(sig[:len(sig)/2])
 		s := big.NewInt(0)
 		s.SetBytes(sig[len(sig)/2:])
-		log.Println("ECDSA: X = " + pk.X.String() + ", Y = " + pk.Y.String())
 		if pk != nil {
 			if ecdsa.Verify(pk, hashed, r, s) {
 				return nil
