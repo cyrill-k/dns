@@ -90,18 +90,39 @@ func testClientVerification(t *testing.T, serverFlag string, debug bool) (ret in
 		return
 	}
 
-	// Build PILA server
-	goServerPath := path.Join(*pilaServer, "main.go")
-	goServerExePath := path.Join(*pilaServer, "main")
-	err = testBuildGoSource(goServerExePath, goServerPath)
-	if err != nil {
-		return
-	}
-
 	// Build PILA client
 	goClientPath := path.Join(*pilaClient, "main.go")
 	goClientExePath := path.Join(*pilaClient, "main")
 	err = testBuildGoSource(goClientExePath, goClientPath)
+	if err != nil {
+		return
+	}
+
+	f, err := testStartServer(serverFlag, debug)
+	if err != nil {
+		return
+	}
+	defer f()
+
+	// Start PILA client
+	goClient := testGetCmd([]string{goClientExePath})
+	if debug {
+		goClient.Stdout = os.Stdout
+		goClient.Stderr = os.Stderr
+	}
+	err = goClient.Run()
+	if err != nil {
+		ret, _ = testGetErrorCode(err)
+		err = fmt.Errorf("Error executing the go client: %s\n", err.Error())
+	}
+	return
+}
+
+func testStartServer(serverFlag string, debug bool) (f func(), err error) {
+	// Build PILA server
+	goServerPath := path.Join(*pilaServer, "main.go")
+	goServerExePath := path.Join(*pilaServer, "main")
+	err = testBuildGoSource(goServerExePath, goServerPath)
 	if err != nil {
 		return
 	}
@@ -130,7 +151,7 @@ func testClientVerification(t *testing.T, serverFlag string, debug bool) (ret in
 	// Start server
 	err = goServer.Start()
 	if err != nil {
-		ret, _ = testGetErrorCode(err)
+		//		ret, _ = testGetErrorCode(err)
 		return
 	}
 
@@ -149,27 +170,15 @@ func testClientVerification(t *testing.T, serverFlag string, debug bool) (ret in
 		return
 	}
 
-	defer func() {
+	return func() {
 		log.Printf("Cleaning up the go server...")
 		testKillProcess(goServer.Process)
-	}()
+	}, nil
+
 	//todo(cyrill): optimize by reading server output and
 	// continuing as soon as "Starting at XXXX" is read
 	//d, _ := time.ParseDuration("2s")
 	//time.Sleep(d)
-
-	// Start PILA client
-	goClient := testGetCmd([]string{goClientExePath})
-	if debug {
-		goClient.Stdout = os.Stdout
-		goClient.Stderr = os.Stderr
-	}
-	err = goClient.Run()
-	if err != nil {
-		ret, _ = testGetErrorCode(err)
-		err = fmt.Errorf("Error executing the go client: %s\n", err.Error())
-	}
-	return
 }
 
 // allow killing process spawned by this command
