@@ -138,8 +138,8 @@ func testStartServer(serverFlag string, debug bool) (cleanUp func(), err error) 
 		goServer = testGetCmd([]string{goServerExePath, serverFlag})
 	}
 	if debug {
-		goServer.Stdout = os.Stdout
-		//goServer.Stderr = os.Stderr
+		//goServer.Stdout = os.Stdout
+		goServer.Stderr = os.Stderr
 	}
 
 	// allow killing process spawned by goServer process
@@ -152,7 +152,7 @@ func testStartServer(serverFlag string, debug bool) (cleanUp func(), err error) 
 	}
 
 	// Get stdout reader
-	serverReader, err := goServer.StderrPipe()
+	serverReader, err := goServer.StdoutPipe()
 	if err != nil {
 		err = errors.New("Error getting stdout pipe: " + err.Error())
 		return

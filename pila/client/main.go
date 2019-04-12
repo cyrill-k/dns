@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -11,11 +12,18 @@ import (
 	"github.com/cyrill-k/dns/pila"
 )
 
-var records = map[string]string{
-	"test.service.": "192.168.0.2",
-}
+var (
+	records = map[string]string{
+		"test.service.": "192.168.0.2",
+	}
 
-var pilaConfig pila.PilaConfig
+	pilaConfig pila.PilaConfig
+
+	disableLoggingFlag = flag.Bool("disable-logging", false, "Disable message logging")
+	remoteIPFlag       = flag.String("remote-ip", "127.0.0.1", "Server IP address")
+	localIPFlag        = flag.String("local-ip", "127.0.0.1", "Client IP address")
+	remotePortFlag     = flag.Uint("remote-port", 7501, "Server IP address")
+)
 
 type ClientConfig struct {
 	LocalPort  uint16
@@ -25,13 +33,19 @@ type ClientConfig struct {
 }
 
 func main() {
+	flag.Parse()
+
 	// process CLI argument
 	var config ClientConfig
-	config.RemoteIP = net.ParseIP(*flag.String("remoteip", "127.0.0.1", "Server IP address"))
-	config.LocalIP = net.ParseIP(*flag.String("localip", "127.0.0.1", "Client IP address"))
-	config.RemotePort = uint16(*flag.Uint("remoteport", 7501, "Server IP address"))
+	config.RemoteIP = net.ParseIP(*remoteIPFlag)
+	config.LocalIP = net.ParseIP(*localIPFlag)
+	config.RemotePort = uint16(*remotePortFlag)
 	//config.RemoteIP = *flag.Uint("localport", "127.0.0.1", "Server IP address")
-	flag.Parse()
+
+	if *disableLoggingFlag {
+		log.SetFlags(0)
+		log.SetOutput(ioutil.Discard)
+	}
 
 	pilaConfig = pila.DefaultConfig()
 	pilaConfig.InitializeEnvironment()

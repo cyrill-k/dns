@@ -21,10 +21,11 @@ var (
 		"test.service.": "1.2.3.4",
 	}
 
-	generateKeys  = flag.Bool("gen", false, "generate new public/private ECDSA keys")
-	keyFolder     = flag.String("genfolder", "-", "folder where the ECDSA keys are saved")
-	debugFlag     = flag.Bool("debug", false, "Enable debug mode")
-	randomsigFlag = flag.Bool("randomsig", false, "Replace signature in the PILA SIG record with random data")
+	generateKeys       = flag.Bool("gen", false, "generate new public/private ECDSA keys")
+	keyFolder          = flag.String("genfolder", "-", "folder where the ECDSA keys are saved")
+	debugFlag          = flag.Bool("debug", false, "Enable debug mode")
+	randomsigFlag      = flag.Bool("randomsig", false, "Replace signature in the PILA SIG record with random data")
+	disableLoggingflag = flag.Bool("disable-logging", false, "Disable message logging")
 
 	signer pila.SignerWithAlgorithm
 
@@ -89,6 +90,11 @@ func main() {
 	// Parse CLI
 	flag.Parse()
 
+	if *disableLoggingFlag {
+		log.SetFlags(0)
+		log.SetOutput(ioutil.Discard)
+	}
+
 	// Create default PILA config
 	config = pila.DefaultConfig()
 	config.InitializeEnvironment()
@@ -147,7 +153,7 @@ func main() {
 
 	// start server
 	port := 7501
-	server := &dns.Server{Addr: ":" + strconv.Itoa(port), Net: "udp", NotifyStartedFunc: func() { log.Printf("[Server] Listening at %d\n", port) }}
+	server := &dns.Server{Addr: ":" + strconv.Itoa(port), Net: "udp", NotifyStartedFunc: func() { fmt.Printf("[Server] Listening at %d\n", port) }}
 	log.Printf("[Server] Starting at %d\n", port)
 	err := server.ListenAndServe()
 	defer server.Shutdown()
