@@ -136,5 +136,3 @@ func DecodeEcdsaKeys(pemEncoded string, pemEncodedPub string) (*ecdsa.PrivateKey
 
 	return privateKey, publicKey
 }
-
-// ***** private dns functions needed in PILA

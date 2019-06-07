@@ -127,18 +127,25 @@ func (c *PilaConfig) PilaRequestSignature(m *dns.Msg) error {
 	return nil
 }
 
-func (conf *PilaConfig) PilaSign(m *dns.Msg, packedOriginalMessage []byte, signalg SignerWithAlgorithm, peerIP net.IP, postSign PostSignFunction) error {
+func (conf *PilaConfig) PilaSign(m *dns.Msg, packedOriginalMessage []byte, signalg SignerWithAlgorithm, peerIP net.IP, postSign PostSignFunction, chain *cert.PilaChain) error {
 	// Extract public key
 	pub, err := GetPublicKeyWithAlgorithm(signalg)
 	if err != nil {
 		return errors.New("Failed to extract public key to send to the certificate server: " + err.Error())
 	}
 
-	// Request certificate of public key
-	h := NewASCertificateHandler(conf)
-	chain, err := h.PilaRequestASCertificate(pub)
-	if err != nil {
-		return err
+	if chain == nil {
+		// Request certificate of public key
+		h := NewASCertificateHandler(conf)
+		chain, err = h.PilaRequestASCertificate(pub)
+		if err != nil {
+			return err
+		}
+		jsonRepresentation, err := chain.JSON(false)
+		if err != nil {
+			log.Fatalf("Failed to create JSON encoding of PilaChain: " + err.Error())
+		}
+		log.Print(string(jsonRepresentation))
 	}
 
 	// Add JSON encoded certificate chain to reply using a TXT record

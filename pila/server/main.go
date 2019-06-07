@@ -25,7 +25,7 @@ var (
 	keyFolder          = flag.String("genfolder", "-", "folder where the ECDSA keys are saved")
 	debugFlag          = flag.Bool("debug", false, "Enable debug mode")
 	randomsigFlag      = flag.Bool("randomsig", false, "Replace signature in the PILA SIG record with random data")
-	disableLoggingflag = flag.Bool("disable-logging", false, "Disable message logging")
+	disableLoggingFlag = flag.Bool("disable-logging", false, "Disable message logging")
 
 	signer pila.SignerWithAlgorithm
 
@@ -73,9 +73,9 @@ func handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
 			func(in []byte) []byte {
 				r, _ := pila.GenerateRandomness(len(in))
 				return r
-			})
+			}, nil)
 	} else {
-		err = config.PilaSign(m, packedOriginalMessage, signer, net.ParseIP(host), pila.PostSignNoOp)
+		err = config.PilaSign(m, packedOriginalMessage, signer, net.ParseIP(host), pila.PostSignNoOp, nil)
 	}
 	if err != nil {
 		log.Printf("[Server] Error signing response: " + err.Error())
@@ -137,7 +137,7 @@ func main() {
 		host := "127.0.0.1"
 		var packedOriginalMessage []byte
 		req.PackBuffer(packedOriginalMessage)
-		if err := config.PilaSign(response, packedOriginalMessage, signer, net.ParseIP(host), pila.PostSignNoOp); err != nil {
+		if err := config.PilaSign(response, packedOriginalMessage, signer, net.ParseIP(host), pila.PostSignNoOp, nil); err != nil {
 			log.Println("[SERVER DEBUG] Error in PilaSign: " + err.Error())
 		}
 
