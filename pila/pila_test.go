@@ -4,6 +4,7 @@ package pila
 
 import (
 	"bufio"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/big"
 	"net"
 	"os"
 	"os/exec"
@@ -31,17 +33,26 @@ const (
 )
 
 const (
-	CLIENT_REQUEST_GENERATION    = iota
-	CLIENT_VERIFICATION          = iota
-	CLIENT_RESPONSE_PARSING      = iota
-	SERVER_CERTIFICATE_RETRIEVAL = iota
-	SERVER_REQUEST_PARSING       = iota
-	SERVER_SIGNATURE             = iota
-	SERVER_RESPONSE_GENERATION   = iota
+	CLIENT_REQUEST_GENERATION             = iota
+	CLIENT_CERTIFICATE_CHAIN_VERIFICATION = iota
+	CLIENT_VERIFICATION                   = iota
+	CLIENT_RESPONSE_PARSING               = iota
+	SERVER_CERTIFICATE_RETRIEVAL          = iota
+	SERVER_CERTIFICATE_GENERATION         = iota
+	SERVER_REQUEST_PARSING                = iota
+	SERVER_SIGNATURE                      = iota
+	SERVER_RESPONSE_GENERATION            = iota
+	ECDSA_SIGN                            = iota
+	ECDSA_VERIFY                          = iota
 
 	SERVER_SIGNATURE_AND_RESPONSE_GENERATION_AND_CERTIFICATE_RETRIEVAL = iota
 
 	CLIENT_RESPONSE_PARSING_AND_VERIFICATION = iota
+)
+
+const (
+	CRYPTO_ALGORITHM_ECDSAP256 = iota
+	CRYPTO_ALGORITHM_ECDSAP384 = iota
 )
 
 var (
@@ -55,37 +66,104 @@ var (
 	}
 )
 
-// func BenchmarkPilaClientRequestGeneration(b *testing.B) {
-// 	benchmarkPilaServerSign(b, CLIENT_REQUEST_GENERATION)
-// }
-// func BenchmarkPilaClientVerification(b *testing.B) {
-// 	benchmarkPilaServerSign(b, CLIENT_VERIFICATION)
-// }
-// func BenchmarkPilaClientResponseParsing(b *testing.B) {
-// 	benchmarkPilaServerSign(b, CLIENT_RESPONSE_PARSING)
-// }
+func BenchmarkAll(b *testing.B) {
+	ecdsaAlgs := map[int]string{CRYPTO_ALGORITHM_ECDSAP256: "ECDSAP256", CRYPTO_ALGORITHM_ECDSAP384: "ECDSAP384"}
+	ecdsaModes := map[int]string{ECDSA_SIGN: "ECDSA_SIGN", ECDSA_VERIFY: "ECDSA_VERIFY"}
+	for algIdx, alg := range ecdsaAlgs {
+		for modeIdx, mode := range ecdsaModes {
+			b.Run(fmt.Sprintf("%s %s", mode, alg), func(bRun *testing.B) { benchmarkEcdsa(bRun, modeIdx, algIdx) })
+		}
+	}
 
-func BenchmarkPilaServerCertificateRetrieval(b *testing.B) {
-	benchmarkPilaServerSign(b, SERVER_CERTIFICATE_RETRIEVAL)
-}
-func BenchmarkPilaServerRequestParsing(b *testing.B) {
-	benchmarkPilaServerSign(b, SERVER_REQUEST_PARSING)
-}
-func BenchmarkPilaServerSignature(b *testing.B) {
-	benchmarkPilaServerSign(b, SERVER_SIGNATURE)
-}
-func BenchmarkPilaServerResponseGeneration(b *testing.B) {
-	benchmarkPilaServerSign(b, SERVER_RESPONSE_GENERATION)
-}
-func BenchmarkPilaServerTotalResponseTime(b *testing.B) {
-	benchmarkPilaServerSign(b, SERVER_SIGNATURE_AND_RESPONSE_GENERATION_AND_CERTIFICATE_RETRIEVAL)
+	serverModes := map[int]string{
+		SERVER_CERTIFICATE_RETRIEVAL: "SERVER_CERTIFICATE_RETRIEVAL",
+		SERVER_REQUEST_PARSING:       "SERVER_REQUEST_PARSING",
+		//SERVER_RESPONSE_GENERATION:   "SERVER_RESPONSE_GENERATION", around 160ns but takes a long time to finish due to large constant factors so I removed it from the tests
+		SERVER_SIGNATURE: "SERVER_SIGNATURE",
+		SERVER_SIGNATURE_AND_RESPONSE_GENERATION_AND_CERTIFICATE_RETRIEVAL: "SERVER_TOTAL"}
+	serverAlgs := map[int]string{CRYPTO_ALGORITHM_ECDSAP256: "ECDSAP256", CRYPTO_ALGORITHM_ECDSAP384: "ECDSAP384"}
+	for algIdx, alg := range serverAlgs {
+		for modeIdx, mode := range serverModes {
+			b.Run(fmt.Sprintf("%s %s", mode, alg), func(bRun *testing.B) { benchmarkPilaServerSign(bRun, modeIdx, algIdx) })
+		}
+	}
+
+	clientModes := map[int]string{
+		CLIENT_REQUEST_GENERATION: "CLIENT_REQUEST_GENERATION",
+		CLIENT_VERIFICATION:       "CLIENT_VERIFICATION",
+		// CLIENT_RESPONSE_PARSING:               "CLIENT_RESPONSE_PARSING",
+		CLIENT_CERTIFICATE_CHAIN_VERIFICATION: "CLIENT_CERTIFICATE_CHAIN_VERIFICATION",
+	}
+	clientAlgs := map[int]string{CRYPTO_ALGORITHM_ECDSAP256: "ECDSAP256", CRYPTO_ALGORITHM_ECDSAP384: "ECDSAP384"}
+	for algIdx, alg := range clientAlgs {
+		for modeIdx, mode := range clientModes {
+			b.Run(fmt.Sprintf("%s %s", mode, alg), func(bRun *testing.B) { benchmarkPilaClientVerify(bRun, modeIdx, algIdx) })
+		}
+	}
 }
 
-// func BenchmarkPilaClientTotalVerificationTime(b *testing.B) {
-// 	benchmarkPilaServerSign(b, CLIENT_RESPONSE_PARSING_AND_VERIFICATION)
-// }
+func benchmarkGeneratePrivateKeyAndHasher(cryptoAlgorithm int) (SignerWithAlgorithm, crypto.Hash) {
+	if cryptoAlgorithm == CRYPTO_ALGORITHM_ECDSAP256 {
+		privateKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		signer := NewECDSASigner(privateKey)
+		return signer, crypto.SHA256
+	} else if cryptoAlgorithm == CRYPTO_ALGORITHM_ECDSAP384 {
+		privateKey, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+		signer := NewECDSASigner(privateKey)
+		return signer, crypto.SHA384
+	} else {
+		return nil, crypto.Hash(0)
+	}
+}
 
-func benchmarkPilaServerSign(b *testing.B, bt int) {
+func benchmarkEcdsa(b *testing.B, bt int, cryptoAlgorithm int) {
+	// setup
+	b.StopTimer()
+	signer, hash := benchmarkGeneratePrivateKeyAndHasher(cryptoAlgorithm)
+
+	for i := 0; i < b.N; i++ {
+		// create fake content
+		content := make([]byte, 1631)
+		rand.Read(content)
+
+		// perform signature
+		hasher := hash.New()
+		hasher.Write(content)
+
+		if bt == ECDSA_SIGN {
+			b.StartTimer()
+		}
+		sig, err := u.Sign(signer.Signer(), hasher.Sum(nil), hash, signer.Algorithm())
+		if err != nil {
+			b.Errorf("Error creating ECDSA signatures: %s", err.Error())
+		}
+		if bt == ECDSA_SIGN {
+			b.StopTimer()
+		}
+
+		// perform verification
+		hasher = hash.New()
+		hasher.Write(content)
+		r := big.NewInt(0)
+		r.SetBytes(sig[:len(sig)/2])
+		s := big.NewInt(0)
+		s.SetBytes(sig[len(sig)/2:])
+		ecdsaPubKey := signer.Signer().Public().(*ecdsa.PublicKey)
+
+		if bt == ECDSA_VERIFY {
+			b.StartTimer()
+		}
+		if !ecdsa.Verify(ecdsaPubKey, hasher.Sum(nil), r, s) {
+			b.Error("could not verify signature")
+		}
+		if bt == ECDSA_VERIFY {
+			b.StopTimer()
+		}
+
+	}
+}
+
+func benchmarkPilaServerSign(b *testing.B, bt int, cryptoAlgorithm int) {
 	// Generate Server State
 	b.StopTimer()
 
@@ -97,9 +175,23 @@ func benchmarkPilaServerSign(b *testing.B, bt int) {
 	config := DefaultConfig()
 	config.InitializeEnvironment()
 
-	// Private keys
-	privateKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	signer := NewECDSASigner(privateKey)
+	var signer SignerWithAlgorithm
+	var chain *cert.PilaChain
+	if bt == SERVER_CERTIFICATE_RETRIEVAL {
+		signer, _ = benchmarkGeneratePrivateKeyAndHasher(cryptoAlgorithm)
+	} else {
+		if cryptoAlgorithm == CRYPTO_ALGORITHM_ECDSAP256 {
+			var priv *ecdsa.PrivateKey
+			priv, _, chain, _, _ = ReadP256Config()
+			signer = NewECDSASigner(priv)
+		} else if cryptoAlgorithm == CRYPTO_ALGORITHM_ECDSAP384 {
+			var priv *ecdsa.PrivateKey
+			priv, _, chain, _, _ = ReadP384Config()
+			signer = NewECDSASigner(priv)
+		} else {
+			b.Error("Unsupported crypto algorithm")
+		}
+	}
 
 	// Generate request
 	req := new(dns.Msg)
@@ -110,44 +202,6 @@ func benchmarkPilaServerSign(b *testing.B, bt int) {
 		b.StartTimer()
 	}
 	for i := 0; i < b.N; i++ {
-
-		if bt == SERVER_RESPONSE_GENERATION {
-			b.StartTimer()
-		}
-
-		// Prepare response
-		response := new(dns.Msg)
-		response.SetReply(req)
-		response.Compress = false
-
-		if bt == SERVER_RESPONSE_GENERATION {
-			b.StopTimer()
-		}
-
-		if bt == SERVER_REQUEST_PARSING {
-			b.StartTimer()
-		}
-
-		benchmarkParseQuery(response)
-
-		if bt == SERVER_REQUEST_PARSING {
-			b.StopTimer()
-		}
-
-		if bt == SERVER_SIGNATURE {
-			b.StartTimer()
-		}
-
-		// Sign response
-		host := "127.0.0.1"
-		var packedOriginalMessage []byte
-		req.PackBuffer(packedOriginalMessage)
-
-		if bt == SERVER_SIGNATURE {
-			b.StopTimer()
-		}
-
-		var chain *cert.PilaChain
 		if bt == SERVER_CERTIFICATE_RETRIEVAL {
 			b.StartTimer()
 
@@ -163,19 +217,42 @@ func benchmarkPilaServerSign(b *testing.B, bt int) {
 			}
 
 			b.StopTimer()
-		} else {
-			chainJsonStringRepresentation := `{"0":{"CanIssue":false,"Comment":"PILA CERTIFICATE","EncAlgorithm":"","ExpirationTime":1559926075,"Issuer":"17-1039","IssuingTime":1559922475,"SignAlgorithm":"ECDSAP384SHA384","Signature":"9I8Ra/VXfy9HNapXj26vhqALuHAs2XjbSdYXiVwNvjdrR142cVleI2ntlSAVdrsPy8UfLOBKXxwua+uz040iBQ==","Subject":"127.0.0.1","SubjectEncKey":null,"SubjectSignKey":"Zn8z4FyIrDMX31cxeCKy2tJ3+0yGdEQ41fgLUzP+oOSGc2RISocemuWqM1koOwAOWtK2PAyQqvkjtFn7f39DDyLQgFY9ikRp2esnSl0xwgSg2xEBTMrtnOLOZUFUbArJ","TRCVersion":1,"Version":1},"1":{"CanIssue":false,"Comment":"AS Certificate","EncAlgorithm":"curve25519xsalsa20poly1305","ExpirationTime":1561474358,"Issuer":"17-ffaa:0:1101","IssuingTime":1539093902,"SignAlgorithm":"ed25519","Signature":"h6DjGKY64jqLAUeu/kynyNK/ECFm96aa6GE6hqN6ZZmKnDr7DCA9lTjIZmbpG9bb2IBbc/KbZWPghci8Q7kzAA==","Subject":"17-1039","SubjectEncKey":"oRqsPfh6JecLw02Adu9J25Wy3N/11oOC9uAonDWkqDA=","SubjectSignKey":"imgMPBcP0GPEiDgQZaS4vNrafvCzeTkbI31gcs8c5oc=","TRCVersion":1,"Version":1},"2":{"CanIssue":true,"Comment":"Core AS Certificate","EncAlgorithm":"curve25519xsalsa20poly1305","ExpirationTime":1561474359,"Issuer":"17-ffaa:0:1101","IssuingTime":1530024759,"SignAlgorithm":"ed25519","Signature":"Y8zhfe4nvgX54s8njHojeO2aDYJPE6e5UrgKys/0zF9KJTCW5VwdPTnmx4u5c9BLqxdrj7YKOibbimCAAcmVCQ==","Subject":"17-ffaa:0:1101","SubjectEncKey":"rtCgQv0qyShOol0EW/ULU41qLvqA6urn+C/tHoDwkwY=","SubjectSignKey":"bXbDRwVSWU4YhjE5eSYWWC8AtqG0zyo+8rcsx3p0v6U=","TRCVersion":1,"Version":1}}`
-			var err error
-			chain, err = cert.PilaChainFromRaw([]byte(chainJsonStringRepresentation))
-			if err != nil {
-				b.Errorf("Error in unmarshalling pila chain: %s", err.Error())
-			}
+			continue
+		}
+
+		if bt == SERVER_RESPONSE_GENERATION {
+			b.StartTimer()
+		}
+
+		// Prepare response
+		response := new(dns.Msg)
+		response.SetReply(req)
+		response.Compress = false
+
+		if bt == SERVER_RESPONSE_GENERATION {
+			b.StopTimer()
+			continue
+		}
+
+		if bt == SERVER_REQUEST_PARSING {
+			b.StartTimer()
+		}
+
+		benchmarkParseQuery(response)
+
+		if bt == SERVER_REQUEST_PARSING {
+			b.StopTimer()
+			continue
 		}
 
 		if bt == SERVER_SIGNATURE {
 			b.StartTimer()
 		}
 
+		// Sign response
+		host := "127.0.0.1"
+		var packedOriginalMessage []byte
+		req.PackBuffer(packedOriginalMessage)
 		if err := config.PilaSign(response, packedOriginalMessage, signer, net.ParseIP(host), PostSignNoOp, chain); err != nil {
 			b.Errorf("[SERVER DEBUG] Error in PilaSign: %s", err.Error())
 		}
@@ -190,11 +267,156 @@ func benchmarkPilaServerSign(b *testing.B, bt int) {
 	// }
 }
 
+func benchmarkGenerateRequestResponsePair(b *testing.B, config *PilaConfig, signer SignerWithAlgorithm, chain *cert.PilaChain) (request *dns.Msg, response *dns.Msg) {
+	request = new(dns.Msg)
+	request.SetQuestion("test.service.", dns.TypeA)
+	config.PilaRequestSignature(request)
+
+	response = request.Copy()
+	response.SetReply(request)
+	response.Compress = false
+	benchmarkParseQuery(response)
+
+	requestPacked, _ := request.Pack()
+	err := config.PilaSign(response, requestPacked, signer, net.ParseIP("127.0.0.1"), PostSignNoOp, chain)
+	if err != nil {
+		b.Errorf("Could not sign request: %s\n", err.Error())
+	}
+	return
+}
+
+func benchmarkPilaClientVerify(b *testing.B, bt int, cryptoAlgorithm int) {
+	// Generate Server State
+	b.StopTimer()
+
+	// disable logging
+	log.SetFlags(0)
+	log.SetOutput(ioutil.Discard)
+	// enable logging
+	// log.SetFlags(log.LstdFlags)
+	// log.SetOutput(os.Stdout)
+
+	// Create default PILA config
+	config := DefaultConfig()
+	config.InitializeEnvironment()
+
+	var signer SignerWithAlgorithm
+	var chain *cert.PilaChain
+	if cryptoAlgorithm == CRYPTO_ALGORITHM_ECDSAP256 {
+		var priv *ecdsa.PrivateKey
+		priv, _, chain, _, _ = ReadP256Config()
+		signer = NewECDSASigner(priv)
+	} else if cryptoAlgorithm == CRYPTO_ALGORITHM_ECDSAP384 {
+		var priv *ecdsa.PrivateKey
+		priv, _, chain, _, _ = ReadP384Config()
+		signer = NewECDSASigner(priv)
+	} else {
+		b.Error("Unsupported crypto algorithm")
+	}
+
+	request, response := benchmarkGenerateRequestResponsePair(b, &config, signer, chain)
+
+	// Read original message and signed message
+	packedOriginalMessage, err := request.Pack()
+	if err != nil {
+		b.Error("Error packing original message: " + err.Error())
+	}
+	m := response
+	localIp := net.ParseIP("127.0.0.1")
+
+	for i := 0; i < b.N; i++ {
+		if bt == CLIENT_REQUEST_GENERATION {
+			b.StartTimer()
+		}
+		// Retrieve (PILA) SIG record from message
+		sigrr, err := getPilaSIG(m)
+		if err != nil {
+			b.Error("Error reading last SIG record from dns message: " + err.Error())
+		}
+		if sigrr == nil {
+			b.Error("No PILA SIG record available")
+		}
+
+		// extract TXT record containing the certificate chain
+		pilaTxt, err := getPilaTxtRecord(m)
+		if err != nil {
+			b.Error("Failed to decode PILA TXT record: " + err.Error())
+		}
+
+		// extract the certificate chain
+		pilaChain, err := cert.PilaChainFromRaw(pilaTxt.CertificateChainRaw)
+		if err != nil {
+			b.Error("Failed to parse PILA certificate chain: " + err.Error())
+		}
+
+		if bt == CLIENT_REQUEST_GENERATION {
+			b.StopTimer()
+			continue
+		}
+
+		if bt == CLIENT_CERTIFICATE_CHAIN_VERIFICATION {
+			b.StartTimer()
+		}
+
+		// verify certificate chain using locally stored trc
+		trc, err := config.readTrc()
+		if err := pilaChain.Verify(cert.PilaCertificateEntity{Ipv4: localIp}, trc); err != nil {
+			b.Error("Failed to verify PILA certificate chain: " + err.Error())
+		}
+
+		if bt == CLIENT_CERTIFICATE_CHAIN_VERIFICATION {
+			b.StopTimer()
+		}
+
+		if bt == CLIENT_VERIFICATION {
+			b.StartTimer()
+		}
+
+		// get public key from leaf cert and set corresponding algorithm & base64 pubkey
+		var algorithm uint8
+		switch pilaChain.Endpoint.SignAlgorithm {
+		case "ECDSAP256SHA256":
+			algorithm = dns.ECDSAP256SHA256
+		case "ECDSAP384SHA384":
+			algorithm = dns.ECDSAP384SHA384
+		default:
+			b.Error("Unsupported signing algorithm in endpoint certificate: " + pilaChain.Endpoint.SignAlgorithm)
+		}
+		pubKeyBase64 := u.ToBase64(pilaChain.Endpoint.SubjectSignKey)
+
+		// Create verification context based on original message & local endpoint identifier
+		additionalInfo, err := getAdditionalInfo(sigrr, packedOriginalMessage, encode(localIp))
+		if err != nil {
+			b.Error("Failed to extract additional info from request")
+		}
+
+		// Create dns.KEY object to verify signature
+		key := createPilaKEY(3, algorithm, pubKeyBase64)
+
+		// Verify signature
+		buf, err := m.Pack()
+		if err != nil {
+			b.Error("Failed to pack message: " + err.Error())
+		}
+		// log.Printf("****************** sigrr = \n\n%+v\n\n", sigrr)
+		// log.Printf("****************** key = \n\n%+v\n\n", key)
+		// log.Printf("****************** buf = \n\n%+v\n\n", buf)
+		// log.Printf("****************** additionalInfo = \n\n%+v\n\n", additionalInfo)
+		err = pilaVerifyRR(sigrr, key, buf, additionalInfo)
+		if err != nil {
+			b.Errorf("Failed to verify RR: %s\n", err.Error())
+		}
+
+		if bt == CLIENT_VERIFICATION {
+			b.StopTimer()
+		}
+	}
+}
+
 func benchmarkParseQuery(m *dns.Msg) {
 	for _, q := range m.Question {
 		switch q.Qtype {
 		case dns.TypeA:
-			log.Printf("[Server] Query for %s\n", q.Name)
 			ip := records[q.Name]
 			if ip != "" {
 				rr, err := dns.NewRR(fmt.Sprintf("%s A %s", q.Name, ip))

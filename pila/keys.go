@@ -8,8 +8,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"io/ioutil"
+	"path"
 
 	"github.com/cyrill-k/dns"
+	"github.com/scionproto/scion/go/lib/crypto/cert"
 )
 
 type SignerWithAlgorithm interface {
@@ -100,39 +102,77 @@ func NewECDSAPublicKey(publicKey *ecdsa.PublicKey) PublicKeyWithAlgorithm {
 	return &signer
 }
 
-func ReadKeys(priv string, pub string) (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
+func ReadKeys(priv string, pub string) (privateKey *ecdsa.PrivateKey, publicKey *ecdsa.PublicKey) {
 	privKey, err := ioutil.ReadFile(priv)
-	if err != nil {
-		panic(err)
+	if err == nil {
+		privateKey = DecodeEcdsaPrivateKey(privKey)
 	}
 	pubKey, err := ioutil.ReadFile(pub)
-	if err != nil {
-		panic(err)
+	if err == nil {
+		publicKey = DecodeEcdsaPublicKey(pubKey)
 	}
-	return DecodeEcdsaKeys(string(privKey), string(pubKey))
+	return
 }
 
 // encodes a ECDSA private/public key using pem encoding & x509 marshalling
-func EncodeEcdsaKeys(privateKey *ecdsa.PrivateKey, publicKey *ecdsa.PublicKey) (string, string) {
-	x509Encoded, _ := x509.MarshalECPrivateKey(privateKey)
-	pemEncoded := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: x509Encoded})
+func EncodeEcdsaPrivateKey(privateKey *ecdsa.PrivateKey) (pemEncoded []byte) {
+	x509Encoded, err := x509.MarshalECPrivateKey(privateKey)
+	if err == nil {
+		pemEncoded = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: x509Encoded})
+	}
+	return
+}
 
-	x509EncodedPub, _ := x509.MarshalPKIXPublicKey(publicKey)
-	pemEncodedPub := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: x509EncodedPub})
-
-	return string(pemEncoded), string(pemEncodedPub)
+// encodes a ECDSA private/public key using pem encoding & x509 marshalling
+func EncodeEcdsaPublicKey(publicKey *ecdsa.PublicKey) (pemEncoded []byte) {
+	x509Encoded, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err == nil {
+		pemEncoded = pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: x509Encoded})
+	}
+	return
 }
 
 // decodes a pem encoded & x509 marshalled public/private key
-func DecodeEcdsaKeys(pemEncoded string, pemEncodedPub string) (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
-	block, _ := pem.Decode([]byte(pemEncoded))
-	x509Encoded := block.Bytes
-	privateKey, _ := x509.ParseECPrivateKey(x509Encoded)
+func DecodeEcdsaPrivateKey(pemEncoded []byte) (privateKey *ecdsa.PrivateKey) {
+	block, _ := pem.Decode(pemEncoded)
+	if block != nil {
+		x509Encoded := block.Bytes
+		var err error
+		privateKey, err = x509.ParseECPrivateKey(x509Encoded)
+		if err != nil {
+			privateKey = nil
+		}
+	}
+	return
+}
 
-	blockPub, _ := pem.Decode([]byte(pemEncodedPub))
-	x509EncodedPub := blockPub.Bytes
-	genericPublicKey, _ := x509.ParsePKIXPublicKey(x509EncodedPub)
-	publicKey := genericPublicKey.(*ecdsa.PublicKey)
+// decodes a pem encoded & x509 marshalled public/private key
+func DecodeEcdsaPublicKey(pemEncoded []byte) (publicKey *ecdsa.PublicKey) {
+	block, _ := pem.Decode(pemEncoded)
+	if block != nil {
+		x509Encoded := block.Bytes
+		genericPublicKey, err := x509.ParsePKIXPublicKey(x509Encoded)
+		if err == nil {
+			// don't panic if wrong type, just return nil
+			publicKey, _ = genericPublicKey.(*ecdsa.PublicKey)
+		}
+	}
+	return
+}
 
-	return privateKey, publicKey
+// encodes a ECDSA private/public key using pem encoding & x509 marshalling
+func EncodeEcdsaKeys(privateKey *ecdsa.PrivateKey, publicKey *ecdsa.PublicKey) ([]byte, []byte) {
+	return EncodeEcdsaPrivateKey(privateKey), EncodeEcdsaPublicKey(publicKey)
+}
+
+// decodes a pem encoded & x509 marshalled public/private key
+func DecodeEcdsaKeys(pemEncoded []byte, pemEncodedPub []byte) (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
+	return DecodeEcdsaPrivateKey(pemEncoded), DecodeEcdsaPublicKey(pemEncodedPub)
+}
+
+// Returns a default private, public key pair and a corresponsing PILA certificate chain
+func ReadKeysAndCertChainFromFolder(root string) (priv *ecdsa.PrivateKey, pub *ecdsa.PublicKey, chain *cert.PilaChain) {
+	priv, pub = ReadKeys(path.Join(root, "priv.pem"), path.Join(root, "pub.pem"))
+	chain, _ = ReadPilaCertificateChain(path.Join(root, "pilachain"))
+	return
 }

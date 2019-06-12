@@ -1,0 +1,24 @@
+~/dns/pila $ go test -run=xxx -bench=.
+goos: linux
+goarch: amd64
+BenchmarkAll/ECDSA_SIGN_ECDSAP256         	   50000	     29238 ns/op
+BenchmarkAll/ECDSA_VERIFY_ECDSAP256       	   20000	     69862 ns/op
+BenchmarkAll/ECDSA_SIGN_ECDSAP384         	     500	   3890906 ns/op
+BenchmarkAll/ECDSA_VERIFY_ECDSAP384       	     200	   8452582 ns/op
+BenchmarkAll/SERVER_TOTAL_ECDSAP256       	   10000	    100589 ns/op
+INFO[06-12|17:53:42] Started                                  id=6c6bbb31 goroutine=dispatcher_bck
+BenchmarkAll/SERVER_CERTIFICATE_RETRIEVAL_ECDSAP256         	    2000	    906686 ns/op
+BenchmarkAll/SERVER_REQUEST_PARSING_ECDSAP256               	  100000	     11214 ns/op
+BenchmarkAll/SERVER_SIGNATURE_ECDSAP256                     	   20000	     66189 ns/op
+BenchmarkAll/SERVER_CERTIFICATE_RETRIEVAL_ECDSAP384         	    2000	    890992 ns/op
+BenchmarkAll/SERVER_REQUEST_PARSING_ECDSAP384               	  100000	     10851 ns/op
+BenchmarkAll/SERVER_SIGNATURE_ECDSAP384                     	     500	   3895422 ns/op
+BenchmarkAll/SERVER_TOTAL_ECDSAP384                         	     300	   5038172 ns/op
+BenchmarkAll/CLIENT_REQUEST_GENERATION_ECDSAP256            	   50000	     30266 ns/op
+BenchmarkAll/CLIENT_VERIFICATION_ECDSAP256                  	   20000	     86211 ns/op
+BenchmarkAll/CLIENT_CERTIFICATE_CHAIN_VERIFICATION_ECDSAP256         	    3000	    450028 ns/op
+BenchmarkAll/CLIENT_REQUEST_GENERATION_ECDSAP384                     	   50000	     30537 ns/op
+BenchmarkAll/CLIENT_VERIFICATION_ECDSAP384                           	     200	   6932673 ns/op
+BenchmarkAll/CLIENT_CERTIFICATE_CHAIN_VERIFICATION_ECDSAP384         	    3000	    492080 ns/op
+PASS
+ok  	_/home/cyrill/dns/pila	108.516s

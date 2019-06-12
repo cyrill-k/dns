@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"strconv"
 	"time"
@@ -32,6 +33,16 @@ type EndpointIdentifierType int
 type ASCertificateHandler struct {
 	conn   *snet.Conn
 	config *PilaConfig
+}
+
+func ReadPilaCertificateChain(p string) (chain *cert.PilaChain, err error) {
+	var chainRaw []byte
+	chainRaw, err = ioutil.ReadFile(p)
+	if err != nil {
+		return
+	}
+	chain, err = cert.PilaChainFromRaw([]byte(chainRaw))
+	return
 }
 
 func NewASCertificateHandler(config *PilaConfig) *ASCertificateHandler {

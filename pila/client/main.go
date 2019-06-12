@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path"
 	"strconv"
 
 	"github.com/cyrill-k/dns"
@@ -23,6 +24,7 @@ var (
 	remoteIPFlag       = flag.String("remote-ip", "127.0.0.1", "Server IP address")
 	localIPFlag        = flag.String("local-ip", "127.0.0.1", "Client IP address")
 	remotePortFlag     = flag.Uint("remote-port", 7501, "Server IP address")
+	storeMsgFolderFlag = flag.String("store-msg-folder", "-", "Folder to store the request and returned response (\"request\", \"response\"")
 )
 
 type ClientConfig struct {
@@ -66,9 +68,28 @@ func main() {
 		os.Exit(pila.EXIT_CODE_EXCHANGE_FAILED)
 	}
 
+	// store conversation
+	if *storeMsgFolderFlag != "-" {
+		rawRequest, err := m.Pack()
+		if err != nil {
+			log.Printf("[Client] Failed to pack request to store in file: %s\n", err.Error())
+		}
+		ioutil.WriteFile(path.Join(*storeMsgFolderFlag, "request"), rawRequest, 0644)
+
+		rawResponse, err := in.Pack()
+		if err != nil {
+			log.Printf("[Client] Failed to pack response to store in file: %s\n", err.Error())
+		}
+		ioutil.WriteFile(path.Join(*storeMsgFolderFlag, "response"), rawResponse, 0644)
+	}
+
 	// verify signature
-	var packedOriginalMessage []byte
-	m.PackBuffer(packedOriginalMessage)
+	packedOriginalMessage, err := m.Pack()
+	if err != nil {
+		log.Printf("[Client] Failed to pack request into buffer: %s\n ", err.Error())
+		os.Exit(pila.EXIT_CODE_INTERNAL_ERROR)
+	}
+	log.Printf("packed orig msg: %+v\n", packedOriginalMessage)
 	err = pilaConfig.PilaVerify(in, packedOriginalMessage, config.LocalIP)
 	if err != nil {
 		log.Printf("[Client] PILA verification failed: %s", err.Error())

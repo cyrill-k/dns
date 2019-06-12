@@ -9,11 +9,14 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 
 	"github.com/cyrill-k/dns"
 	"github.com/cyrill-k/dns/pila"
+
+	"github.com/scionproto/scion/go/lib/crypto/cert"
 )
 
 var (
@@ -22,7 +25,8 @@ var (
 	}
 
 	generateKeys       = flag.Bool("gen", false, "generate new public/private ECDSA keys")
-	keyFolder          = flag.String("genfolder", "-", "folder where the ECDSA keys are saved")
+	keyFolder          = flag.String("keyfolder", "-", "Read ECDSA keys from folder (priv.pem & pub.pem)")
+	pilaChainPath      = flag.String("pilachain", "-", "Path of the PILA certificate chain (e.g., \"pilachain\")")
 	debugFlag          = flag.Bool("debug", false, "Enable debug mode")
 	randomsigFlag      = flag.Bool("randomsig", false, "Replace signature in the PILA SIG record with random data")
 	disableLoggingFlag = flag.Bool("disable-logging", false, "Disable message logging")
@@ -65,17 +69,28 @@ func handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	var packedOriginalMessage []byte
-	r.PackBuffer(packedOriginalMessage)
+	packedOriginalMessage, err := r.Pack()
+	if err != nil {
+		log.Printf("[Server] Failed to pack request into buffer: %s\n ", err.Error())
+		os.Exit(pila.EXIT_CODE_INTERNAL_ERROR)
+	}
+	var chain *cert.PilaChain
+	if *pilaChainPath != "-" {
+		chain, err = pila.ReadPilaCertificateChain(*pilaChainPath)
+		if err != nil {
+			log.Printf("[Server] Error reading pila certificate chain from file (%s): %s", *pilaChainPath, err.Error())
+			return
+		}
+	}
 	if *randomsigFlag {
 		// Replace signature with a random value of the same length
 		err = config.PilaSign(m, packedOriginalMessage, signer, net.ParseIP(host),
 			func(in []byte) []byte {
 				r, _ := pila.GenerateRandomness(len(in))
 				return r
-			}, nil)
+			}, chain)
 	} else {
-		err = config.PilaSign(m, packedOriginalMessage, signer, net.ParseIP(host), pila.PostSignNoOp, nil)
+		err = config.PilaSign(m, packedOriginalMessage, signer, net.ParseIP(host), pila.PostSignNoOp, chain)
 	}
 	if err != nil {
 		log.Printf("[Server] Error signing response: " + err.Error())
@@ -102,8 +117,8 @@ func main() {
 	if *keyFolder == "-" {
 		*keyFolder = "/home/cyrill/test/"
 	}
-	privPath := filepath.Join(*keyFolder, "private.pem")
-	pubPath := filepath.Join(*keyFolder, "public.pem")
+	privPath := filepath.Join(*keyFolder, "priv.pem")
+	pubPath := filepath.Join(*keyFolder, "pub.pem")
 
 	if *generateKeys {
 		privateKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -111,17 +126,20 @@ func main() {
 
 		encPriv, encPub := pila.EncodeEcdsaKeys(privateKey, &publicKey)
 
-		err := ioutil.WriteFile(privPath, []byte(encPriv), 0644)
+		err := ioutil.WriteFile(privPath, encPriv, 0644)
 		if err != nil {
 			panic(err)
 		}
-		err = ioutil.WriteFile(pubPath, []byte(encPub), 0644)
+		err = ioutil.WriteFile(pubPath, encPub, 0644)
 		if err != nil {
 			panic(err)
 		}
 	}
 
 	priv, _ := pila.ReadKeys(privPath, pubPath)
+	if priv == nil {
+		log.Fatalf("[Server] Failed to read private key from file (%s)\n", privPath)
+	}
 	signer = pila.NewECDSASigner(priv)
 
 	if *debugFlag {

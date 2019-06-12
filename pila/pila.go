@@ -9,10 +9,12 @@ import (
 	"crypto/rsa"
 	"encoding/binary"
 	"errors"
+	"io/ioutil"
 	"log"
 	"math/big"
 	"net"
 	"os"
+	"path"
 	"strings"
 	"time"
 
@@ -28,6 +30,7 @@ import (
 const (
 	EXIT_CODE_EXCHANGE_FAILED     = 2
 	EXIT_CODE_VERIFICATION_FAILED = 3
+	EXIT_CODE_INTERNAL_ERROR      = 4
 )
 
 var u dns.PilaUtility = dns.PilaUtility{}
@@ -82,6 +85,39 @@ func DefaultConfig() PilaConfig {
 		port:           50123,
 		certificateServerReadDeadline: csReadDeadline,
 		MaxUdpSize:                    4096}
+}
+
+// Returns a default private, public key pair, a corresponsing PILA certificate chain, and a matching request response pair
+func ReadConfigFromFolder(root string) (priv *ecdsa.PrivateKey, pub *ecdsa.PublicKey, chain *cert.PilaChain, request *dns.Msg, response *dns.Msg) {
+	priv, pub, chain = ReadKeysAndCertChainFromFolder(root)
+	chain, _ = ReadPilaCertificateChain(path.Join(root, "pilachain"))
+
+	requestRaw, err := ioutil.ReadFile(path.Join(root, "request"))
+	if err == nil {
+		request = new(dns.Msg)
+		err = request.Unpack(requestRaw)
+		// if err != nil {
+		// 	log.Fatalf("Error unpacking stored message: %s\n", err.Error())
+		// }
+	}
+
+	responseRaw, err := ioutil.ReadFile(path.Join(root, "response"))
+	if err == nil {
+		response = new(dns.Msg)
+		err = response.Unpack(responseRaw)
+		// if err != nil {
+		// 	log.Fatalf("Error unpacking stored message: %s\n", err.Error())
+		// }
+	}
+	return
+}
+
+func ReadP256Config() (priv *ecdsa.PrivateKey, pub *ecdsa.PublicKey, chain *cert.PilaChain, request *dns.Msg, response *dns.Msg) {
+	return ReadConfigFromFolder("P256")
+}
+
+func ReadP384Config() (priv *ecdsa.PrivateKey, pub *ecdsa.PublicKey, chain *cert.PilaChain, request *dns.Msg, response *dns.Msg) {
+	return ReadConfigFromFolder("P384")
 }
 
 func (c *PilaConfig) readTrc() (*trc.TRC, error) {
@@ -178,7 +214,6 @@ func (conf *PilaConfig) PilaSign(m *dns.Msg, packedOriginalMessage []byte, signa
 	return nil
 }
 
-// rename remoteIP to localIP
 func (conf *PilaConfig) PilaVerify(m *dns.Msg, packedOriginalMessage []byte, localIp net.IP) error {
 	// Retrieve (PILA) SIG record from message
 	sigrr, err := getPilaSIG(m)
