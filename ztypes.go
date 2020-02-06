@@ -275,7 +275,10 @@ func (rr *APL) len(off int, compression map[string]struct{}) int {
 func (rr *AVC) len(off int, compression map[string]struct{}) int {
 	l := rr.Hdr.len(off, compression)
 	for _, x := range rr.Txt {
-		l += len(x) + 1
+		msg := make([]byte, 256)
+		d, err := packString(x, msg, 0)
+		fatalIfErr(err)
+		l += d
 	}
 	return l
 }
@@ -468,7 +471,10 @@ func (rr *NIMLOC) len(off int, compression map[string]struct{}) int {
 func (rr *NINFO) len(off int, compression map[string]struct{}) int {
 	l := rr.Hdr.len(off, compression)
 	for _, x := range rr.ZSData {
-		l += len(x) + 1
+		msg := make([]byte, 256)
+		d, err := packString(x, msg, 0)
+		fatalIfErr(err)
+		l += d
 	}
 	return l
 }
@@ -573,7 +579,10 @@ func (rr *SOA) len(off int, compression map[string]struct{}) int {
 func (rr *SPF) len(off int, compression map[string]struct{}) int {
 	l := rr.Hdr.len(off, compression)
 	for _, x := range rr.Txt {
-		l += len(x) + 1
+		msg := make([]byte, 256)
+		d, err := packString(x, msg, 0)
+		fatalIfErr(err)
+		l += d
 	}
 	return l
 }
@@ -643,7 +652,10 @@ func (rr *TSIG) len(off int, compression map[string]struct{}) int {
 func (rr *TXT) len(off int, compression map[string]struct{}) int {
 	l := rr.Hdr.len(off, compression)
 	for _, x := range rr.Txt {
-		l += len(x) + 1
+		msg := make([]byte, 256)
+		d, err := packString(x, msg, 0)
+		fatalIfErr(err)
+		l += d
 	}
 	return l
 }
