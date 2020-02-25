@@ -178,7 +178,7 @@ func main() {
 				case `dns:"domain-name"`:
 					o("for _, x := range rr.%s { l += domainNameLen(x, off+l, compression, false) }\n")
 				case `dns:"txt"`:
-					o("for _, x := range rr.%s {\nmsg := make([]byte, 256)\nd, err := packString(x, msg, 0)\nfatalIfErr(err)\nl += d }\n")
+					o("for _, x := range rr.%s {\nmsg := make([]byte, 256)\nd, err := packString(x, msg, 0)\nif err != nil { panic(err) }\nl += d }\n")
 				case `dns:"apl"`:
 					o("for _, x := range rr.%s { l += x.len() }\n")
 				default:

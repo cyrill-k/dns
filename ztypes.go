@@ -277,7 +277,9 @@ func (rr *AVC) len(off int, compression map[string]struct{}) int {
 	for _, x := range rr.Txt {
 		msg := make([]byte, 256)
 		d, err := packString(x, msg, 0)
-		fatalIfErr(err)
+		if err != nil {
+			panic(err)
+		}
 		l += d
 	}
 	return l
@@ -473,7 +475,9 @@ func (rr *NINFO) len(off int, compression map[string]struct{}) int {
 	for _, x := range rr.ZSData {
 		msg := make([]byte, 256)
 		d, err := packString(x, msg, 0)
-		fatalIfErr(err)
+		if err != nil {
+			panic(err)
+		}
 		l += d
 	}
 	return l
@@ -581,7 +585,9 @@ func (rr *SPF) len(off int, compression map[string]struct{}) int {
 	for _, x := range rr.Txt {
 		msg := make([]byte, 256)
 		d, err := packString(x, msg, 0)
-		fatalIfErr(err)
+		if err != nil {
+			panic(err)
+		}
 		l += d
 	}
 	return l
@@ -654,7 +660,9 @@ func (rr *TXT) len(off int, compression map[string]struct{}) int {
 	for _, x := range rr.Txt {
 		msg := make([]byte, 256)
 		d, err := packString(x, msg, 0)
-		fatalIfErr(err)
+		if err != nil {
+			panic(err)
+		}
 		l += d
 	}
 	return l
